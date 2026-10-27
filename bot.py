@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import threading
+import calendar
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import psycopg2
@@ -69,6 +70,8 @@ def init_db():
 def db_guardar_tarea(chat_id, motivo, fecha_dt, rec_valor=None, rec_unidad=None, es_secuencial=False, intervalo_dias=0):
     if not DATABASE_URL:
         return False
+    # Asegurar creación de tabla si no existe
+    init_db()
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
@@ -177,7 +180,7 @@ def db_eliminar_tarea(tarea_id):
         logger.error(f"Error eliminando tarea: {e}")
         return False
 
-# --- 2. ANTI-SLEEP / KEEP ALIVE SYSTEM (RENDER & SUPABASE) ---
+# --- 2. ANTI-SLEEP / KEEP ALIVE SYSTEM ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -193,20 +196,15 @@ def start_health_check():
     server.serve_forever()
 
 def keep_alive_ping():
-    """Mantiene despierto el servicio web de Render y hace consultas periódicas a Supabase para evitar pausas."""
     url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/" if RENDER_EXTERNAL_URL else None
-    
     while True:
-        time.sleep(300) # Cada 5 minutos (evita que Render duerma a los 15 min)
-        # 1. Ping al servidor HTTP de Render
+        time.sleep(300)
         if url:
             try:
                 r = requests.get(url, timeout=10)
                 logger.info(f"🔄 Self-ping Render OK (Status: {r.status_code})")
             except Exception as e:
                 logger.error(f"⚠️ Error en Self-ping Render: {e}")
-        
-        # 2. Ping liviano a Supabase para mantener la BD activa
         if DATABASE_URL:
             try:
                 conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
@@ -324,9 +322,14 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "w_set_dia":
-        kb = [[InlineKeyboardButton(str(d).zfill(2), callback_data=f"select_dia_{d}") for d in range(r, r+7)] for r in range(1, 31, 7)]
+        # Corrección: Exactamente 31 días divididos limpiamente en cuadrícula
+        dias = list(range(1, 32))
+        kb = [
+            [InlineKeyboardButton(str(d).zfill(2), callback_data=f"select_dia_{d}") for d in dias[i:i+7]]
+            for i in range(0, len(dias), 7)
+        ]
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="m1_crear")])
-        await query.edit_message_text("Selecciona el Día:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("Selecciona el Día (Máximo 31):", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("select_dia_"):
         d = query.data.split("_")[2]
@@ -372,27 +375,45 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "w_guardar_tarea":
         try:
-            fecha_str = f"{wdata['ano']}-{wdata['mes']}-{wdata['dia']} 09:00:00"
+            # Validación estricta de días según el mes/año seleccionado
+            dia = int(wdata['dia'])
+            mes = int(wdata['mes'])
+            ano = int(wdata['ano'])
+            max_dias = calendar.monthrange(ano, mes)[1]
+            
+            if dia > max_dias:
+                await query.edit_message_text(
+                    f"❌ Fecha no válida: El mes {mes}/{ano} solo tiene {max_dias} días.",
+                    reply_markup=teclado_wizard_fecha(wdata)
+                )
+                return
+
+            fecha_str = f"{ano}-{mes:02d}-{dia:02d} 09:00:00"
             fecha_dt = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M:%S")
             rec_val = int(wdata["rec_num"]) if wdata.get("mostrar_alarma") else None
             rec_uni = wdata.get("rec_uni") if wdata.get("mostrar_alarma") else None
 
-            tid = db_guardar_tarea(chat_id, wdata["motivo"], fecha_dt, rec_val, rec_uni)
+            motivo_final = wdata.get("motivo", "Sin definir")
+            if motivo_final == "Sin definir":
+                await context.bot.send_message(chat_id=chat_id, text="⚠️ Recuerda asignarle un nombre/motivo a la tarea.")
+                return
+
+            tid = db_guardar_tarea(chat_id, motivo_final, fecha_dt, rec_val, rec_uni)
             if tid:
                 msg_confirm = (
-                    f"✅ ¡Tarea Guardada con Éxito!\n\n"
-                    f"📌 Motivo: {wdata['motivo']}\n"
-                    f"📅 Fecha: {wdata['dia']}/{wdata['mes']}/{wdata['ano']}\n"
+                    f"✅ ¡Tarea Guardada con Éxito en la Base de Datos!\n\n"
+                    f"📌 Motivo: {motivo_final}\n"
+                    f"📅 Fecha: {dia:02d}/{mes:02d}/{ano}\n"
                 )
                 if rec_val:
                     msg_confirm += f"⏰ Alarma: {rec_val} {rec_uni} antes"
                 
-                await query.edit_message_text(msg_confirm, reply_markup=teclado_principal())
                 context.user_data["wizard"] = {}
+                await query.edit_message_text(msg_confirm, reply_markup=teclado_principal())
             else:
                 await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal())
         except Exception as e:
-            await query.edit_message_text(f"❌ Fecha no válida: {e}", reply_markup=teclado_principal())
+            await query.edit_message_text(f"❌ Fecha u opción no válida: {e}", reply_markup=teclado_principal())
 
     elif query.data == "w_generar_ical":
         try:
@@ -416,7 +437,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 InlineKeyboardButton(f"{'✅ ' if filtro=='dia' else ''}Hoy / Día", callback_data="m2_dia"),
                 InlineKeyboardButton(f"{'✅ ' if filtro=='semana' else ''}Semana", callback_data="m2_semana"),
-                InlineKeyboardButton(f"{'✅ ' if filtro=='mes' else ''}Mes", callback_data="m2_mes")
+                InlineKeyboardButton(f"{'✅ ' if filtro=='mes' else ''}Mes", callback_data="m2_mes"),
+                InlineKeyboardButton(f"{'✅ ' if filtro=='todos' else ''}Todos", callback_data="m2_todos")
             ],
             [InlineKeyboardButton("⬅️ Volver al Menú", callback_data="menu_principal")]
         ]
@@ -593,7 +615,6 @@ def main():
     logger.info("Iniciando Tareas_TDAH Bot...")
     init_db()
 
-    # Hilos para mantener activo Render y Supabase 24/7
     threading.Thread(target=start_health_check, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
