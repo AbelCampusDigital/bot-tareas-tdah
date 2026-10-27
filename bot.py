@@ -1,4 +1,4 @@
-import os
+mport os
 import time
 import logging
 import threading
@@ -512,4 +512,102 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- MENÚ 5: IA (COACH DOPAMINA & FOCO) ---
     elif query.data == "m5_ia_dopamina":
-        tareas = db_obtener_tareas(chat_
+        tareas = db_obtener_tareas(chat_id, "todos")
+        if not tareas:
+            await query.edit_message_text("⚡ Menú 5: Coach de Dopamina\n\n¡No tienes tareas pendientes!", reply_markup=teclado_principal())
+            return
+
+        resumen_tareas = "\n".join([f"- {t[1]} (Fecha: {t[2].strftime('%d/%m')})" for t in tareas[:7]])
+        await context.bot.send_message(chat_id=chat_id, text="⚡ Calculando tus Puntos de Experiencia (XP) y Motivación TDAH...")
+        
+        prompt = (
+            f"Actúa como un Coach de Gamificación e Hiperfoco para personas con TDAH. "
+            f"Aquí están las tareas pendientes del usuario:\n{resumen_tareas}\n\n"
+            f"1. Asigna Puntos de Experiencia (XP) a cada tarea según dificultad estimante.\n"
+            f"2. Elige la tarea ideal para empezar AHORA con el 'Efecto Impulso'.\n"
+            f"3. Escribe un mensaje corto de hiperfoco enérgico sin juicios."
+        )
+        res = consultar_gemini(prompt)
+        await context.bot.send_message(chat_id=chat_id, text=f"⚡ Sistema de Gamificación & Dopamina:\n\n{res}")
+
+    # --- MENÚ 6: REUTILIZAR TAREA SECUENCIAL ---
+    elif query.data == "m6_secuencial":
+        tareas = db_obtener_tareas(chat_id, "todos")
+        if not tareas:
+            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas para volver secuenciales.", reply_markup=teclado_principal())
+            return
+
+        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
+        kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
+        await query.edit_message_text(
+            "🔄 Menú 6: Convertir Tarea en Rutina Secuencial\n"
+            "Selecciona una tarea para fijarle una frecuencia automática de repetición al completarse:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif query.data.startswith("sec_sel_"):
+        tid = int(query.data.split("_")[2])
+        kb = [
+            [InlineKeyboardButton("📆 Diaria (Cada 1 día)", callback_data=f"sec_freq_{tid}_1")],
+            [InlineKeyboardButton("📅 Semanal (Cada 7 días)", callback_data=f"sec_freq_{tid}_7")],
+            [InlineKeyboardButton("🗓️ Mensual (Cada 30 días)", callback_data=f"sec_freq_{tid}_30")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
+        ]
+        await query.edit_message_text("Selecciona la frecuencia con la que se repetirá la tarea al marcarla como realizada:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("sec_freq_"):
+        parts = query.data.split("_")
+        tid = int(parts[2])
+        intervalo = int(parts[3])
+        db_hacer_secuencial(tid, intervalo)
+        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial (repetición cada {intervalo} días)!", reply_markup=teclado_principal())
+
+# --- 6. TEXT INPUT HANDLER ---
+async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    estado = USER_STATES.get(chat_id)
+
+    if estado == "ESCRIBIENDO_MOTIVO":
+        if "wizard" not in context.user_data:
+            context.user_data["wizard"] = {}
+        context.user_data["wizard"]["motivo"] = update.message.text
+        USER_STATES.pop(chat_id, None)
+        await update.message.reply_text(
+            "✅ Motivo guardado. Pulsa sobre el menú para continuar:",
+            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
+        )
+
+    elif estado == "ESCRIBIENDO_ALARMA_NUM":
+        if "wizard" not in context.user_data:
+            context.user_data["wizard"] = {}
+        text = "".join(filter(str.isdigit, update.message.text))
+        context.user_data["wizard"]["rec_num"] = text if text else "15"
+        USER_STATES.pop(chat_id, None)
+        await update.message.reply_text(
+            "✅ Número de alarma actualizado. Pulsa sobre el menú:",
+            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
+        )
+
+# --- 7. MAIN APPLICATION ---
+def main():
+    logger.info("Iniciando Tareas_TDAH Bot...")
+    init_db()
+
+    # Hilos para mantener activo Render y Supabase 24/7
+    threading.Thread(target=start_health_check, daemon=True).start()
+    threading.Thread(target=keep_alive_ping, daemon=True).start()
+
+    if not TOKEN:
+        logger.critical("❌ ERROR: TELEGRAM_TOKEN no configurado.")
+        return
+
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(procesar_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
+
+    logger.info("🚀 Bot activo y escuchando en Telegram.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
