@@ -698,4 +698,79 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas.", reply_markup=teclado_principal(es_admin))
             return
 
-        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"
+        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
+        kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
+        await query.edit_message_text(
+            "🔄 Menú 6: Convertir Tarea en Rutina Secuencial\n"
+            "Selecciona una tarea para fijarle una frecuencia automática:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif query.data.startswith("sec_sel_"):
+        tid = int(query.data.split("_")[2])
+        kb = [
+            [InlineKeyboardButton("📆 Diaria (Cada 1 día)", callback_data=f"sec_freq_{tid}_1")],
+            [InlineKeyboardButton("📅 Semanal (Cada 7 días)", callback_data=f"sec_freq_{tid}_7")],
+            [InlineKeyboardButton("🗓️ Mensual (Cada 30 días)", callback_data=f"sec_freq_{tid}_30")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
+        ]
+        await query.edit_message_text("Selecciona la frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("sec_freq_"):
+        parts = query.data.split("_")
+        tid = int(parts[2])
+        intervalo = int(parts[3])
+        db_hacer_secuencial(tid, intervalo, chat_id)
+        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial!", reply_markup=teclado_principal(es_admin))
+
+# --- 6. TEXT INPUT HANDLER ---
+async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in USER_STATES:
+        return
+
+    estado = USER_STATES.get(chat_id)
+
+    if estado == "ESCRIBIENDO_MOTIVO":
+        if "wizard" not in context.user_data:
+            context.user_data["wizard"] = {}
+        context.user_data["wizard"]["motivo"] = update.message.text
+        USER_STATES.pop(chat_id, None)
+        await update.message.reply_text(
+            "✅ Motivo guardado. Pulsa sobre el menú para continuar:",
+            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
+        )
+
+    elif estado == "ESCRIBIENDO_ALARMA_NUM":
+        if "wizard" not in context.user_data:
+            context.user_data["wizard"] = {}
+        text = "".join(filter(str.isdigit, update.message.text))
+        context.user_data["wizard"]["rec_num"] = text if text else "15"
+        USER_STATES.pop(chat_id, None)
+        await update.message.reply_text(
+            "✅ Número de alarma actualizado. Pulsa sobre el menú:",
+            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
+        )
+
+# --- 7. MAIN APPLICATION ---
+def main():
+    logger.info("Iniciando Tareas_TDAH Bot...")
+    init_db()
+
+    threading.Thread(target=start_health_check, daemon=True).start()
+    threading.Thread(target=keep_alive_ping, daemon=True).start()
+
+    if not TOKEN:
+        logger.critical("❌ ERROR: TELEGRAM_TOKEN no configurado.")
+        return
+
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CallbackQueryHandler(procesar_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
+
+    logger.info("🚀 Bot activo y escuchando en Telegram.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
