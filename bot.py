@@ -32,12 +32,12 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # --- CONFIGURACIÓN DE PRIVACIDAD Y GITHUB ---
-# NOTA PARA EL REPOSITORIO PÚBLICO (GITHUB):
-# Si vas a subir este código a un repositorio público y quieres que el bot sea privado para ti,
-# debes configurar la variable de entorno 'MI_TELEGRAM_ID' en tu proveedor (como Render).
-# Si dejas el código abierto para que lo use más gente, puedes quitar la validación estricta de ID
-# o cada usuario deberá configurar su propio ID de Telegram en el entorno.
-MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID", 198614541))
+# El ID del administrador se lee estrictamente de la variable de entorno de Render (MI_TELEGRAM_ID).
+# Si vas a subir el código a GitHub, no aparecerá ningún número personal tuyo hardcodeado.
+try:
+    MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID"))
+except (TypeError, ValueError):
+    MI_TELEGRAM_ID = None  # Si no está configurada, nadie es admin por seguridad
 
 # State Management for User Text Inputs
 USER_STATES = {}
