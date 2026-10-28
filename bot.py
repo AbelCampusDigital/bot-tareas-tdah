@@ -32,8 +32,6 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # --- CONFIGURACIÓN DE ADMINISTRADOR (Opcional) ---
-# Si se define en Render (MI_TELEGRAM_ID), desbloquea el panel de administración para ese usuario.
-# Si no se define, el bot funciona con normalidad pero sin panel de administración.
 try:
     MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID")) if os.environ.get("MI_TELEGRAM_ID") else None
 except (TypeError, ValueError):
@@ -106,7 +104,6 @@ def ejecutar_rutina_limpieza_bd():
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
         
-        # a) Sin tareas y > 1 día inactivo
         cur.execute("""
             SELECT u.chat_id FROM usuarios_actividad u
             WHERE u.ultimo_login < NOW() - INTERVAL '1 day'
@@ -117,7 +114,6 @@ def ejecutar_rutina_limpieza_bd():
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
             logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>1 día) sin tareas.")
 
-        # b) Tareas completadas y > 1 semana inactivo
         cur.execute("""
             SELECT u.chat_id FROM usuarios_actividad u
             WHERE u.ultimo_login < NOW() - INTERVAL '7 days'
@@ -129,7 +125,6 @@ def ejecutar_rutina_limpieza_bd():
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
             logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>7 días) con todo completado.")
 
-        # c) Huérfanos > 30 días
         cur.execute("DELETE FROM usuarios_actividad WHERE ultimo_login < NOW() - INTERVAL '30 days';")
 
         conn.commit()
@@ -367,14 +362,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     welcome_text = (
         f"🧠 ¡Hola! Soy tu bot Tareas_TDAH.\n"
-        f"🆔 **Tu ID de usuario es:** `{user_id}`\n\n"
+        f"🆔 Tu ID de usuario es: {user_id}\n\n"
         f"Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco.\n"
         f"Selecciona una opción del menú inferior para comenzar:"
     )
     await update.message.reply_text(
         text=welcome_text,
-        reply_markup=teclado_principal(es_admin),
-        parse_mode="Markdown"
+        reply_markup=teclado_principal(es_admin)
     )
 
 async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,9 +405,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⛔ Acceso denegado. Solo para administradores.", show_alert=True)
             return
         await query.edit_message_text(
-            "🛡️ **Panel de Administración**\nSelecciona una opción de gestión global:",
-            reply_markup=teclado_admin(),
-            parse_mode="Markdown"
+            "🛡️ Panel de Administración\nSelecciona una opción de gestión global:",
+            reply_markup=teclado_admin()
         )
 
     elif query.data == "admin_stats":
@@ -431,15 +424,15 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.close()
             conn.close()
 
-            msg = f"📊 **Estadísticas Globales de Uso:**\n\n" \
+            msg = f"📊 Estadísticas Globales de Uso:\n\n" \
                   f"• Usuarios totales registrados: {total_usuarios}\n" \
                   f"• Tareas totales en BD: {total_tareas}\n\n" \
-                  f"🕒 **Últimos usuarios activos:**\n"
+                  f"🕒 Últimos usuarios activos:\n"
             for u in usuarios:
-                msg += f" - ID: `{u[0]}` | Acceso: {u[1].strftime('%d/%m/%Y %H:%M')}\n"
+                msg += f" - ID: {u[0]} | Acceso: {u[1].strftime('%d/%m/%Y %H:%M')}\n"
 
             kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
             await query.edit_message_text(f"❌ Error obteniendo estadísticas: {e}", reply_markup=teclado_admin())
 
@@ -454,15 +447,15 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.close()
             conn.close()
 
-            msg = "👥 **Listado global de tareas (Todos los usuarios):**\n\n"
+            msg = "👥 Listado global de tareas:\n\n"
             if not tareas:
                 msg += "No hay tareas registradas en el sistema."
             else:
                 for t in tareas:
-                    msg += f"• T#{t[0]} [User: `{t[1]}`] - {t[2]} ({t[3]})\n"
+                    msg += f"• T#{t[0]} [User: {t[1]}] - {t[2]} ({t[3]})\n"
 
             kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
             await query.edit_message_text(f"❌ Error listando tareas: {e}", reply_markup=teclado_admin())
 
@@ -471,7 +464,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         ejecutar_rutina_limpieza_bd()
         kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
-        await query.edit_message_text("🧹 **Limpieza forzada ejecutada con éxito.**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text("🧹 Limpieza forzada ejecutada con éxito.", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data == "m1_crear":
         await query.edit_message_text(
@@ -705,79 +698,4 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas.", reply_markup=teclado_principal(es_admin))
             return
 
-        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
-        kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
-        await query.edit_message_text(
-            "🔄 Menú 6: Convertir Tarea en Rutina Secuencial\n"
-            "Selecciona una tarea para fijarle una frecuencia automática:",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-
-    elif query.data.startswith("sec_sel_"):
-        tid = int(query.data.split("_")[2])
-        kb = [
-            [InlineKeyboardButton("📆 Diaria (Cada 1 día)", callback_data=f"sec_freq_{tid}_1")],
-            [InlineKeyboardButton("📅 Semanal (Cada 7 días)", callback_data=f"sec_freq_{tid}_7")],
-            [InlineKeyboardButton("🗓️ Mensual (Cada 30 días)", callback_data=f"sec_freq_{tid}_30")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
-        ]
-        await query.edit_message_text("Selecciona la frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
-
-    elif query.data.startswith("sec_freq_"):
-        parts = query.data.split("_")
-        tid = int(parts[2])
-        intervalo = int(parts[3])
-        db_hacer_secuencial(tid, intervalo, chat_id)
-        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial!", reply_markup=teclado_principal(es_admin))
-
-# --- 6. TEXT INPUT HANDLER ---
-async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in USER_STATES:
-        return
-
-    estado = USER_STATES.get(chat_id)
-
-    if estado == "ESCRIBIENDO_MOTIVO":
-        if "wizard" not in context.user_data:
-            context.user_data["wizard"] = {}
-        context.user_data["wizard"]["motivo"] = update.message.text
-        USER_STATES.pop(chat_id, None)
-        await update.message.reply_text(
-            "✅ Motivo guardado. Pulsa sobre el menú para continuar:",
-            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
-        )
-
-    elif estado == "ESCRIBIENDO_ALARMA_NUM":
-        if "wizard" not in context.user_data:
-            context.user_data["wizard"] = {}
-        text = "".join(filter(str.isdigit, update.message.text))
-        context.user_data["wizard"]["rec_num"] = text if text else "15"
-        USER_STATES.pop(chat_id, None)
-        await update.message.reply_text(
-            "✅ Número de alarma actualizado. Pulsa sobre el menú:",
-            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
-        )
-
-# --- 7. MAIN APPLICATION ---
-def main():
-    logger.info("Iniciando Tareas_TDAH Bot...")
-    init_db()
-
-    threading.Thread(target=start_health_check, daemon=True).start()
-    threading.Thread(target=keep_alive_ping, daemon=True).start()
-
-    if not TOKEN:
-        logger.critical("❌ ERROR: TELEGRAM_TOKEN no configurado.")
-        return
-
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CallbackQueryHandler(procesar_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
-
-    logger.info("🚀 Bot activo y escuchando en Telegram.")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"
