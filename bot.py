@@ -31,6 +31,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# --- CONFIGURACIÓN DE PRIVACIDAD ---
+# Cambia 123456789 por tu ID real de Telegram (puedes obtenerlo escribiendo a @userinfobot en Telegram)
+# Opcional: También puedes configurarlo en Render como variable de entorno llamada MI_TELEGRAM_ID
+MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID", 123456789))
+
 # State Management for User Text Inputs
 USER_STATES = {}
 
@@ -70,7 +75,6 @@ def init_db():
 def db_guardar_tarea(chat_id, motivo, fecha_dt, rec_valor=None, rec_unidad=None, es_secuencial=False, intervalo_dias=0):
     if not DATABASE_URL:
         return False
-    # Asegurar creación de tabla si no existe
     init_db()
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
@@ -277,6 +281,11 @@ def teclado_wizard_fecha(datos):
 
 # --- 5. HANDLERS TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != MI_TELEGRAM_ID:
+        await update.message.reply_text("⛔ **Este bot es privado y exclusivo para su propietario.** No tienes autorización para usarlo.")
+        return
+
     welcome_text = (
         "🧠 ¡Bienvenido a Tareas_TDAH Bot!\n\n"
         "Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco.\n"
@@ -289,6 +298,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
+    
+    if user_id != MI_TELEGRAM_ID:
+        await query.answer("⛔ Este bot es privado. No autorizado.", show_alert=True)
+        return
+
     await query.answer()
     chat_id = query.message.chat_id
 
@@ -322,7 +337,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "w_set_dia":
-        # Corrección: Exactamente 31 días divididos limpiamente en cuadrícula
         dias = list(range(1, 32))
         kb = [
             [InlineKeyboardButton(str(d).zfill(2), callback_data=f"select_dia_{d}") for d in dias[i:i+7]]
@@ -375,7 +389,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "w_guardar_tarea":
         try:
-            # Validación estricta de días según el mes/año seleccionado
             dia = int(wdata['dia'])
             mes = int(wdata['mes'])
             ano = int(wdata['ano'])
@@ -586,6 +599,11 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 6. TEXT INPUT HANDLER ---
 async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != MI_TELEGRAM_ID:
+        await update.message.reply_text("⛔ **Este bot es privado y exclusivo para su propietario.** No tienes autorización para usarlo.")
+        return
+
     chat_id = update.effective_chat.id
     estado = USER_STATES.get(chat_id)
 
