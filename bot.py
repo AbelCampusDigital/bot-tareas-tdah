@@ -31,13 +31,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- CONFIGURACIÓN DE PRIVACIDAD Y GITHUB ---
-# El ID del administrador se lee estrictamente de la variable de entorno de Render (MI_TELEGRAM_ID).
-# Si vas a subir el código a GitHub, no aparecerá ningún número personal tuyo hardcodeado.
+# --- CONFIGURACIÓN DE ADMINISTRADOR (Opcional) ---
+# Si se define en Render (MI_TELEGRAM_ID), desbloquea el panel de administración para ese usuario.
+# Si no se define, el bot funciona con normalidad pero sin panel de administración.
 try:
-    MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID"))
+    MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID")) if os.environ.get("MI_TELEGRAM_ID") else None
 except (TypeError, ValueError):
-    MI_TELEGRAM_ID = None  # Si no está configurada, nadie es admin por seguridad
+    MI_TELEGRAM_ID = None
 
 # State Management for User Text Inputs
 USER_STATES = {}
@@ -51,7 +51,6 @@ def init_db():
         try:
             conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
             cur = conn.cursor()
-            # Tabla de tareas vinculada al chat_id/user_id con registro de último login
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tareas (
                     id SERIAL PRIMARY KEY,
@@ -66,7 +65,6 @@ def init_db():
                     creado_en TIMESTAMP DEFAULT NOW()
                 );
             """)
-            # Tabla auxiliar para control de accesos e inactividad de usuarios
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS usuarios_actividad (
                     chat_id BIGINT PRIMARY KEY,
@@ -84,7 +82,6 @@ def init_db():
     return False
 
 def registrar_o_actualizar_usuario(chat_id):
-    """Registra la sesión del usuario y actualiza su fecha de último acceso (para la limpieza automática)."""
     if not DATABASE_URL:
         return
     try:
@@ -103,12 +100,6 @@ def registrar_o_actualizar_usuario(chat_id):
         logger.error(f"Error registrando actividad de usuario: {e}")
 
 def ejecutar_rutina_limpieza_bd():
-    """
-    Subrutina de mantenimiento para ahorrar espacio en Supabase:
-    a) Si un usuario no tiene tareas y lleva más de 1 día sin entrar -> Se elimina.
-    b) Si un usuario tiene todas sus tareas finalizadas y lleva más de 1 semana sin entrar -> Se elimina.
-    c) Regla extra: Limpieza de huérfanos (usuarios registrados sin tareas ni actividad en más de 30 días).
-    """
     if not DATABASE_URL:
         return
     try:
@@ -121,30 +112,25 @@ def ejecutar_rutina_limpieza_bd():
             WHERE u.ultimo_login < NOW() - INTERVAL '1 day'
             AND NOT EXISTS (SELECT 1 FROM tareas t WHERE t.chat_id = u.chat_id);
         """)
-        inactivos_sin_tareas = cur.fetchall()
-        for row in inactivos_sin_tareas:
+        for row in cur.fetchall():
             uid = row[0]
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
             logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>1 día) sin tareas.")
 
-        # b) Todas las tareas finalizadas/completadas y > 1 semana inactivo
+        # b) Tareas completadas y > 1 semana inactivo
         cur.execute("""
             SELECT u.chat_id FROM usuarios_actividad u
             WHERE u.ultimo_login < NOW() - INTERVAL '7 days'
             AND NOT EXISTS (SELECT 1 FROM tareas t WHERE t.chat_id = u.chat_id AND t.estado = 'pendiente');
         """)
-        inactivos_completados = cur.fetchall()
-        for row in inactivos_completados:
+        for row in cur.fetchall():
             uid = row[0]
             cur.execute("DELETE FROM tareas WHERE chat_id = %s;", (uid,))
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
             logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>7 días) con todo completado.")
 
-        # c) Regla extra: Registros huérfanos con más de 30 días sin ningún tipo de movimiento
-        cur.execute("""
-            DELETE FROM usuarios_actividad 
-            WHERE ultimo_login < NOW() - INTERVAL '30 days';
-        """)
+        # c) Huérfanos > 30 días
+        cur.execute("DELETE FROM usuarios_actividad WHERE ultimo_login < NOW() - INTERVAL '30 days';")
 
         conn.commit()
         cur.close()
@@ -324,7 +310,6 @@ def teclado_principal(es_admin=False):
         [InlineKeyboardButton("⚡ 5. IA: Coach Dopamina & Foco", callback_data="m5_ia_dopamina")],
         [InlineKeyboardButton("🔄 6. Reutilizar Tarea Secuencial", callback_data="m6_secuencial")]
     ]
-    # Si el usuario es el administrador, añadimos el botón especial de Admin
     if es_admin:
         keyboard.append([InlineKeyboardButton("🛡️ Panel de Administrador", callback_data="menu_admin")])
     return InlineKeyboardMarkup(keyboard)
@@ -375,11 +360,10 @@ def teclado_wizard_fecha(datos):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Subrutina automática al iniciar sesión: registra actividad y ejecuta limpieza
     registrar_o_actualizar_usuario(user_id)
     ejecutar_rutina_limpieza_bd()
 
-    es_admin = (user_id == MI_TELEGRAM_ID)
+    es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
 
     welcome_text = (
         f"🧠 ¡Hola! Soy tu bot Tareas_TDAH.\n"
@@ -399,10 +383,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     chat_id = query.message.chat_id
 
-    # Actualizar actividad en cada interacción del menú
     registrar_o_actualizar_usuario(user_id)
-
-    es_admin = (user_id == MI_TELEGRAM_ID)
+    es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
 
     if "wizard" not in context.user_data:
         context.user_data["wizard"] = {
@@ -417,7 +399,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wdata = context.user_data["wizard"]
 
-    # MENÚ PRINCIPAL
     if query.data == "menu_principal":
         USER_STATES.pop(chat_id, None)
         await query.edit_message_text(
@@ -425,7 +406,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=teclado_principal(es_admin)
         )
 
-    # --- PANEL DE ADMINISTRADOR (EXCLUSIVO MI_TELEGRAM_ID) ---
     elif query.data == "menu_admin":
         if not es_admin:
             await query.answer("⛔ Acceso denegado. Solo para administradores.", show_alert=True)
@@ -489,12 +469,10 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_limpiar_db":
         if not es_admin:
             return
-        # Forzar ejecución manual de la rutina de limpieza
         ejecutar_rutina_limpieza_bd()
         kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
-        await query.edit_message_text("🧹 **Limpieza forzada ejecutada con éxito.**\nSe han purgado los registros inactivos según las políticas de mantenimiento.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await query.edit_message_text("🧹 **Limpieza forzada ejecutada con éxito.**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-    # --- MENÚ 1: AÑADIR TAREA ---
     elif query.data == "m1_crear":
         await query.edit_message_text(
             "➕ Menú 1: Configurar Nueva Tarea\n"
@@ -605,7 +583,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generando enlace: {e}")
 
-    # --- MENÚ 2: LISTAR TAREAS (SOLO LAS DEL USUARIO ACTUAL) ---
     elif query.data.startswith("m2_") or query.data == "m2_listar":
         filtro = "todos"
         if "_" in query.data and query.data != "m2_listar":
@@ -634,7 +611,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
-    # --- MENÚ 3: MODIFICAR TAREAS (AISLADO POR CHAT_ID) ---
     elif query.data.startswith("m3_") or query.data == "m3_modificar":
         filtro = "todos"
         if query.data.startswith("m3_f_"):
@@ -669,7 +645,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(query.data.split("_")[2])
         res = db_completar_tarea(tid, chat_id)
         if res == "reprogramada":
-            await context.bot.send_message(chat_id=chat_id, text=f"🔄 Tarea #{tid} completada y reprogramada automáticamente para el siguiente ciclo.")
+            await context.bot.send_message(chat_id=chat_id, text=f"🔄 Tarea #{tid} completada y reprogramada automáticamente.")
         else:
             await context.bot.send_message(chat_id=chat_id, text=f"🎉 ¡Tarea #{tid} completada! ¡Dopamina liberada! ⚡")
         await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
@@ -680,7 +656,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"🗑️ Tarea #{tid} eliminada.")
         await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
 
-    # --- MENÚ 4: IA (DESGLOSE ANTI-PARÁLISIS TDAH) ---
     elif query.data == "m4_ia_desglose":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
@@ -691,7 +666,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
         await query.edit_message_text(
             "🧩 Menú 4: Desglose Inteligente TDAH (Micro-pasos)\n"
-            "Elige la tarea que te da pereza o bloqueo. La IA la dividirá en 3 acciones de 3 minutos:",
+            "Elige la tarea que te da pereza o bloqueo:",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
@@ -701,17 +676,14 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tarea_sel = next((t for t in tareas if t[0] == tid), None)
 
         if tarea_sel:
-            await context.bot.send_message(chat_id=chat_id, text="🧠 Gemini fragmentando tarea... Por favor espera unos segundos.")
+            await context.bot.send_message(chat_id=chat_id, text="🧠 Gemini fragmentando tarea...")
             prompt = (
-                f"Actúa como un experto en TDAH y disfunción ejecutiva. "
-                f"La persona tiene bloqueada esta tarea: '{tarea_sel[1]}'. "
-                f"Divide esta tarea en exactamente 3 micro-pasos absurdamente sencillos de menos de 5 minutos. "
-                f"Formato breve con emojis. Ánimo conciso y positivo."
+                f"Actúa como un experto en TDAH. La persona tiene bloqueada esta tarea: '{tarea_sel[1]}'. "
+                f"Divide esta tarea en exactamente 3 micro-pasos absurdamente sencillos de menos de 5 minutos."
             )
             res = consultar_gemini(prompt)
             await context.bot.send_message(chat_id=chat_id, text=f"🧩 Plan Micro-pasos Anti-Bloqueo:\n\n{res}")
 
-    # --- MENÚ 5: IA (COACH DOPAMINA & FOCO) ---
     elif query.data == "m5_ia_dopamina":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
@@ -719,30 +691,25 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         resumen_tareas = "\n".join([f"- {t[1]} (Fecha: {t[2].strftime('%d/%m')})" for t in tareas[:7]])
-        await context.bot.send_message(chat_id=chat_id, text="⚡ Calculando tus Puntos de Experiencia (XP) y Motivación TDAH...")
-        
+        await context.bot.send_message(chat_id=chat_id, text="⚡ Calculando Puntos de Experiencia (XP)...")
         prompt = (
-            f"Actúa como un Coach de Gamificación e Hiperfoco para personas con TDAH. "
-            f"Aquí están las tareas pendientes del usuario:\n{resumen_tareas}\n\n"
-            f"1. Asigna Puntos de Experiencia (XP) a cada tarea según dificultad estimante.\n"
-            f"2. Elige la tarea ideal para empezar AHORA con el 'Efecto Impulso'.\n"
-            f"3. Escribe un mensaje corto de hiperfoco enérgico sin juicios."
+            f"Actúa como un Coach de Gamificación e Hiperfoco TDAH. Tareas pendientes:\n{resumen_tareas}\n"
+            f"1. Asigna XP.\n2. Elige la tarea ideal para empezar AHORA.\n3. Mensaje corto de hiperfoco."
         )
         res = consultar_gemini(prompt)
         await context.bot.send_message(chat_id=chat_id, text=f"⚡ Sistema de Gamificación & Dopamina:\n\n{res}")
 
-    # --- MENÚ 6: REUTILIZAR TAREA SECUENCIAL ---
     elif query.data == "m6_secuencial":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas para volver secuenciales.", reply_markup=teclado_principal(es_admin))
+            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas.", reply_markup=teclado_principal(es_admin))
             return
 
         kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
         await query.edit_message_text(
             "🔄 Menú 6: Convertir Tarea en Rutina Secuencial\n"
-            "Selecciona una tarea para fijarle una frecuencia automática de repetición al completarse:",
+            "Selecciona una tarea para fijarle una frecuencia automática:",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
@@ -754,18 +721,21 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🗓️ Mensual (Cada 30 días)", callback_data=f"sec_freq_{tid}_30")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
         ]
-        await query.edit_message_text("Selecciona la frecuencia con la que se repetirá la tarea al marcarla como realizada:", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("Selecciona la frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("sec_freq_"):
         parts = query.data.split("_")
         tid = int(parts[2])
         intervalo = int(parts[3])
         db_hacer_secuencial(tid, intervalo, chat_id)
-        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial (repetición cada {intervalo} días)!", reply_markup=teclado_principal(es_admin))
+        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial!", reply_markup=teclado_principal(es_admin))
 
 # --- 6. TEXT INPUT HANDLER ---
 async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if chat_id not in USER_STATES:
+        return
+
     estado = USER_STATES.get(chat_id)
 
     if estado == "ESCRIBIENDO_MOTIVO":
