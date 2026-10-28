@@ -31,10 +31,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- CONFIGURACIÓN DE PRIVACIDAD ---
-# Cambia 123456789 por tu ID real de Telegram (puedes obtenerlo escribiendo a @userinfobot en Telegram)
-# Opcional: También puedes configurarlo en Render como variable de entorno llamada MI_TELEGRAM_ID
-MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID", 123456789))
+# --- CONFIGURACIÓN DE PRIVACIDAD Y GITHUB ---
+# NOTA PARA EL REPOSITORIO PÚBLICO (GITHUB):
+# Si vas a subir este código a un repositorio público y quieres que el bot sea privado para ti,
+# debes configurar la variable de entorno 'MI_TELEGRAM_ID' en tu proveedor (como Render).
+# Si dejas el código abierto para que lo use más gente, puedes quitar la validación estricta de ID
+# o cada usuario deberá configurar su propio ID de Telegram en el entorno.
+MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID", 198614541))
 
 # State Management for User Text Inputs
 USER_STATES = {}
@@ -48,6 +51,7 @@ def init_db():
         try:
             conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
             cur = conn.cursor()
+            # Tabla de tareas vinculada al chat_id/user_id con registro de último login
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tareas (
                     id SERIAL PRIMARY KEY,
@@ -62,15 +66,91 @@ def init_db():
                     creado_en TIMESTAMP DEFAULT NOW()
                 );
             """)
+            # Tabla auxiliar para control de accesos e inactividad de usuarios
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios_actividad (
+                    chat_id BIGINT PRIMARY KEY,
+                    ultimo_login TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            """)
             conn.commit()
             cur.close()
             conn.close()
-            logger.info("✅ Supabase 'tareas' table ready.")
+            logger.info("✅ Supabase tables ready.")
             return True
         except Exception as e:
             logger.error(f"Error connecting to Supabase: {e}")
             time.sleep(2)
     return False
+
+def registrar_o_actualizar_usuario(chat_id):
+    """Registra la sesión del usuario y actualiza su fecha de último acceso (para la limpieza automática)."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO usuarios_actividad (chat_id, ultimo_login) 
+            VALUES (%s, NOW()) 
+            ON CONFLICT (chat_id) 
+            DO UPDATE SET ultimo_login = NOW();
+        """, (chat_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error registrando actividad de usuario: {e}")
+
+def ejecutar_rutina_limpieza_bd():
+    """
+    Subrutina de mantenimiento para ahorrar espacio en Supabase:
+    a) Si un usuario no tiene tareas y lleva más de 1 día sin entrar -> Se elimina.
+    b) Si un usuario tiene todas sus tareas finalizadas y lleva más de 1 semana sin entrar -> Se elimina.
+    c) Regla extra: Limpieza de huérfanos (usuarios registrados sin tareas ni actividad en más de 30 días).
+    """
+    if not DATABASE_URL:
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        cur = conn.cursor()
+        
+        # a) Sin tareas y > 1 día inactivo
+        cur.execute("""
+            SELECT u.chat_id FROM usuarios_actividad u
+            WHERE u.ultimo_login < NOW() - INTERVAL '1 day'
+            AND NOT EXISTS (SELECT 1 FROM tareas t WHERE t.chat_id = u.chat_id);
+        """)
+        inactivos_sin_tareas = cur.fetchall()
+        for row in inactivos_sin_tareas:
+            uid = row[0]
+            cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
+            logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>1 día) sin tareas.")
+
+        # b) Todas las tareas finalizadas/completadas y > 1 semana inactivo
+        cur.execute("""
+            SELECT u.chat_id FROM usuarios_actividad u
+            WHERE u.ultimo_login < NOW() - INTERVAL '7 days'
+            AND NOT EXISTS (SELECT 1 FROM tareas t WHERE t.chat_id = u.chat_id AND t.estado = 'pendiente');
+        """)
+        inactivos_completados = cur.fetchall()
+        for row in inactivos_completados:
+            uid = row[0]
+            cur.execute("DELETE FROM tareas WHERE chat_id = %s;", (uid,))
+            cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
+            logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>7 días) con todo completado.")
+
+        # c) Regla extra: Registros huérfanos con más de 30 días sin ningún tipo de movimiento
+        cur.execute("""
+            DELETE FROM usuarios_actividad 
+            WHERE ultimo_login < NOW() - INTERVAL '30 days';
+        """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error en rutina de limpieza de BD: {e}")
 
 def db_guardar_tarea(chat_id, motivo, fecha_dt, rec_valor=None, rec_unidad=None, es_secuencial=False, intervalo_dias=0):
     if not DATABASE_URL:
@@ -127,13 +207,13 @@ def db_obtener_tareas(chat_id, filtro_tiempo="todos"):
         logger.error(f"Error consultando tareas: {e}")
         return []
 
-def db_completar_tarea(tarea_id):
+def db_completar_tarea(tarea_id, chat_id):
     if not DATABASE_URL:
         return False
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
-        cur.execute("SELECT chat_id, motivo, fecha_vencimiento, recordatorio_valor, recordatorio_unidad, es_secuencial, intervalo_dias FROM tareas WHERE id = %s;", (tarea_id,))
+        cur.execute("SELECT chat_id, motivo, fecha_vencimiento, recordatorio_valor, recordatorio_unidad, es_secuencial, intervalo_dias FROM tareas WHERE id = %s AND chat_id = %s;", (tarea_id, chat_id))
         t = cur.fetchone()
         
         if t and t[5]:
@@ -154,13 +234,13 @@ def db_completar_tarea(tarea_id):
         logger.error(f"Error completando tarea: {e}")
         return False
 
-def db_hacer_secuencial(tarea_id, intervalo_dias):
+def db_hacer_secuencial(tarea_id, intervalo_dias, chat_id):
     if not DATABASE_URL:
         return False
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
-        cur.execute("UPDATE tareas SET es_secuencial = TRUE, intervalo_dias = %s WHERE id = %s;", (intervalo_dias, tarea_id))
+        cur.execute("UPDATE tareas SET es_secuencial = TRUE, intervalo_dias = %s WHERE id = %s AND chat_id = %s;", (intervalo_dias, tarea_id, chat_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -169,13 +249,13 @@ def db_hacer_secuencial(tarea_id, intervalo_dias):
         logger.error(f"Error configurando tarea secuencial: {e}")
         return False
 
-def db_eliminar_tarea(tarea_id):
+def db_eliminar_tarea(tarea_id, chat_id):
     if not DATABASE_URL:
         return False
     try:
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
-        cur.execute("DELETE FROM tareas WHERE id = %s;", (tarea_id,))
+        cur.execute("DELETE FROM tareas WHERE id = %s AND chat_id = %s;", (tarea_id, chat_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -235,7 +315,7 @@ def consultar_gemini(prompt):
         return f"❌ Error llamando a Gemini IA: {str(e)}"
 
 # --- 4. TELEGRAM KEYBOARDS & MENUS ---
-def teclado_principal():
+def teclado_principal(es_admin=False):
     keyboard = [
         [InlineKeyboardButton("➕ 1. Añadir Tarea", callback_data="m1_crear")],
         [InlineKeyboardButton("📋 2. Listar Tareas", callback_data="m2_listar")],
@@ -243,6 +323,18 @@ def teclado_principal():
         [InlineKeyboardButton("🧩 4. IA: Desglose Anti-Parálisis", callback_data="m4_ia_desglose")],
         [InlineKeyboardButton("⚡ 5. IA: Coach Dopamina & Foco", callback_data="m5_ia_dopamina")],
         [InlineKeyboardButton("🔄 6. Reutilizar Tarea Secuencial", callback_data="m6_secuencial")]
+    ]
+    # Si el usuario es el administrador, añadimos el botón especial de Admin
+    if es_admin:
+        keyboard.append([InlineKeyboardButton("🛡️ Panel de Administrador", callback_data="menu_admin")])
+    return InlineKeyboardMarkup(keyboard)
+
+def teclado_admin():
+    keyboard = [
+        [InlineKeyboardButton("📊 1. Estadísticas de Usuarios", callback_data="admin_stats")],
+        [InlineKeyboardButton("👥 2. Listar Tareas de Otros", callback_data="admin_listar_otros")],
+        [InlineKeyboardButton("🧹 3. Forzar Limpieza / Borrar", callback_data="admin_limpiar_db")],
+        [InlineKeyboardButton("⬅️ Volver al Menú Principal", callback_data="menu_principal")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -282,30 +374,35 @@ def teclado_wizard_fecha(datos):
 # --- 5. HANDLERS TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != MI_TELEGRAM_ID:
-        await update.message.reply_text("⛔ **Este bot es privado y exclusivo para su propietario.** No tienes autorización para usarlo.")
-        return
+    
+    # Subrutina automática al iniciar sesión: registra actividad y ejecuta limpieza
+    registrar_o_actualizar_usuario(user_id)
+    ejecutar_rutina_limpieza_bd()
+
+    es_admin = (user_id == MI_TELEGRAM_ID)
 
     welcome_text = (
-        "🧠 ¡Bienvenido a Tareas_TDAH Bot!\n\n"
-        "Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco.\n"
-        "Selecciona una opción del menú inferior para comenzar:"
+        f"🧠 ¡Hola! Soy tu bot Tareas_TDAH.\n"
+        f"🆔 **Tu ID de usuario es:** `{user_id}`\n\n"
+        f"Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco.\n"
+        f"Selecciona una opción del menú inferior para comenzar:"
     )
     await update.message.reply_text(
         text=welcome_text,
-        reply_markup=teclado_principal()
+        reply_markup=teclado_principal(es_admin),
+        parse_mode="Markdown"
     )
 
 async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    
-    if user_id != MI_TELEGRAM_ID:
-        await query.answer("⛔ Este bot es privado. No autorizado.", show_alert=True)
-        return
-
     await query.answer()
+    user_id = query.from_user.id
     chat_id = query.message.chat_id
+
+    # Actualizar actividad en cada interacción del menú
+    registrar_o_actualizar_usuario(user_id)
+
+    es_admin = (user_id == MI_TELEGRAM_ID)
 
     if "wizard" not in context.user_data:
         context.user_data["wizard"] = {
@@ -325,8 +422,77 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_STATES.pop(chat_id, None)
         await query.edit_message_text(
             "🧠 Menú Principal - Tareas_TDAH\nElige la acción a realizar:",
-            reply_markup=teclado_principal()
+            reply_markup=teclado_principal(es_admin)
         )
+
+    # --- PANEL DE ADMINISTRADOR (EXCLUSIVO MI_TELEGRAM_ID) ---
+    elif query.data == "menu_admin":
+        if not es_admin:
+            await query.answer("⛔ Acceso denegado. Solo para administradores.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "🛡️ **Panel de Administración**\nSelecciona una opción de gestión global:",
+            reply_markup=teclado_admin(),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "admin_stats":
+        if not es_admin:
+            return
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(DISTINCT chat_id) FROM usuarios_actividad;")
+            total_usuarios = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM tareas;")
+            total_tareas = cur.fetchone()[0]
+            cur.execute("SELECT chat_id, ultimo_login FROM usuarios_actividad ORDER BY ultimo_login DESC LIMIT 10;")
+            usuarios = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            msg = f"📊 **Estadísticas Globales de Uso:**\n\n" \
+                  f"• Usuarios totales registrados: {total_usuarios}\n" \
+                  f"• Tareas totales en BD: {total_tareas}\n\n" \
+                  f"🕒 **Últimos usuarios activos:**\n"
+            for u in usuarios:
+                msg += f" - ID: `{u[0]}` | Acceso: {u[1].strftime('%d/%m/%Y %H:%M')}\n"
+
+            kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error obteniendo estadísticas: {e}", reply_markup=teclado_admin())
+
+    elif query.data == "admin_listar_otros":
+        if not es_admin:
+            return
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            cur = conn.cursor()
+            cur.execute("SELECT id, chat_id, motivo, estado, fecha_vencimiento FROM tareas ORDER BY creado_en DESC LIMIT 20;")
+            tareas = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            msg = "👥 **Listado global de tareas (Todos los usuarios):**\n\n"
+            if not tareas:
+                msg += "No hay tareas registradas en el sistema."
+            else:
+                for t in tareas:
+                    msg += f"• T#{t[0]} [User: `{t[1]}`] - {t[2]} ({t[3]})\n"
+
+            kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error listando tareas: {e}", reply_markup=teclado_admin())
+
+    elif query.data == "admin_limpiar_db":
+        if not es_admin:
+            return
+        # Forzar ejecución manual de la rutina de limpieza
+        ejecutar_rutina_limpieza_bd()
+        kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
+        await query.edit_message_text("🧹 **Limpieza forzada ejecutada con éxito.**\nSe han purgado los registros inactivos según las políticas de mantenimiento.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     # --- MENÚ 1: AÑADIR TAREA ---
     elif query.data == "m1_crear":
@@ -414,7 +580,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tid = db_guardar_tarea(chat_id, motivo_final, fecha_dt, rec_val, rec_uni)
             if tid:
                 msg_confirm = (
-                    f"✅ ¡Tarea Guardada con Éxito en la Base de Datos!\n\n"
+                    f"✅ ¡Tarea Guardada con Éxito en tu apartado personal!\n\n"
                     f"📌 Motivo: {motivo_final}\n"
                     f"📅 Fecha: {dia:02d}/{mes:02d}/{ano}\n"
                 )
@@ -422,11 +588,11 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg_confirm += f"⏰ Alarma: {rec_val} {rec_uni} antes"
                 
                 context.user_data["wizard"] = {}
-                await query.edit_message_text(msg_confirm, reply_markup=teclado_principal())
+                await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
             else:
-                await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal())
+                await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal(es_admin))
         except Exception as e:
-            await query.edit_message_text(f"❌ Fecha u opción no válida: {e}", reply_markup=teclado_principal())
+            await query.edit_message_text(f"❌ Fecha u opción no válida: {e}", reply_markup=teclado_principal(es_admin))
 
     elif query.data == "w_generar_ical":
         try:
@@ -439,7 +605,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generando enlace: {e}")
 
-    # --- MENÚ 2: LISTAR TAREAS ---
+    # --- MENÚ 2: LISTAR TAREAS (SOLO LAS DEL USUARIO ACTUAL) ---
     elif query.data.startswith("m2_") or query.data == "m2_listar":
         filtro = "todos"
         if "_" in query.data and query.data != "m2_listar":
@@ -468,7 +634,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
-    # --- MENÚ 3: MODIFICAR TAREAS ---
+    # --- MENÚ 3: MODIFICAR TAREAS (AISLADO POR CHAT_ID) ---
     elif query.data.startswith("m3_") or query.data == "m3_modificar":
         filtro = "todos"
         if query.data.startswith("m3_f_"):
@@ -501,24 +667,24 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("mod_comp_"):
         tid = int(query.data.split("_")[2])
-        res = db_completar_tarea(tid)
+        res = db_completar_tarea(tid, chat_id)
         if res == "reprogramada":
             await context.bot.send_message(chat_id=chat_id, text=f"🔄 Tarea #{tid} completada y reprogramada automáticamente para el siguiente ciclo.")
         else:
             await context.bot.send_message(chat_id=chat_id, text=f"🎉 ¡Tarea #{tid} completada! ¡Dopamina liberada! ⚡")
-        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal())
+        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
 
     elif query.data.startswith("mod_elim_"):
         tid = int(query.data.split("_")[2])
-        db_eliminar_tarea(tid)
+        db_eliminar_tarea(tid, chat_id)
         await context.bot.send_message(chat_id=chat_id, text=f"🗑️ Tarea #{tid} eliminada.")
-        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal())
+        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
 
     # --- MENÚ 4: IA (DESGLOSE ANTI-PARÁLISIS TDAH) ---
     elif query.data == "m4_ia_desglose":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("🧩 Menú 4: IA Anti-Parálisis\n\nNo tienes tareas pendientes para desglosar.", reply_markup=teclado_principal())
+            await query.edit_message_text("🧩 Menú 4: IA Anti-Parálisis\n\nNo tienes tareas pendientes para desglosar.", reply_markup=teclado_principal(es_admin))
             return
 
         kb = [[InlineKeyboardButton(f"🧩 Desglosar: {t[1][:25]}...", callback_data=f"ia_desg_{t[0]}")] for t in tareas[:5]]
@@ -549,7 +715,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "m5_ia_dopamina":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("⚡ Menú 5: Coach de Dopamina\n\n¡No tienes tareas pendientes!", reply_markup=teclado_principal())
+            await query.edit_message_text("⚡ Menú 5: Coach de Dopamina\n\n¡No tienes tareas pendientes!", reply_markup=teclado_principal(es_admin))
             return
 
         resumen_tareas = "\n".join([f"- {t[1]} (Fecha: {t[2].strftime('%d/%m')})" for t in tareas[:7]])
@@ -569,7 +735,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "m6_secuencial":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas para volver secuenciales.", reply_markup=teclado_principal())
+            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas para volver secuenciales.", reply_markup=teclado_principal(es_admin))
             return
 
         kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
@@ -594,16 +760,11 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = query.data.split("_")
         tid = int(parts[2])
         intervalo = int(parts[3])
-        db_hacer_secuencial(tid, intervalo)
-        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial (repetición cada {intervalo} días)!", reply_markup=teclado_principal())
+        db_hacer_secuencial(tid, intervalo, chat_id)
+        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial (repetición cada {intervalo} días)!", reply_markup=teclado_principal(es_admin))
 
 # --- 6. TEXT INPUT HANDLER ---
 async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != MI_TELEGRAM_ID:
-        await update.message.reply_text("⛔ **Este bot es privado y exclusivo para su propietario.** No tienes autorización para usarlo.")
-        return
-
     chat_id = update.effective_chat.id
     estado = USER_STATES.get(chat_id)
 
