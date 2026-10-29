@@ -60,8 +60,12 @@ def init_db():
                     estado TEXT DEFAULT 'pendiente',
                     es_secuencial BOOLEAN DEFAULT FALSE,
                     intervalo_dias INT DEFAULT 0,
+                    notificado BOOLEAN DEFAULT FALSE,
                     creado_en TIMESTAMP DEFAULT NOW()
                 );
+            """)
+            cur.execute("""
+                ALTER TABLE tareas ADD COLUMN IF NOT EXISTS notificado BOOLEAN DEFAULT FALSE;
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS usuarios_actividad (
@@ -141,8 +145,8 @@ def db_guardar_tarea(chat_id, motivo, fecha_dt, rec_valor=None, rec_unidad=None,
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO tareas (chat_id, motivo, fecha_vencimiento, recordatorio_valor, recordatorio_unidad, es_secuencial, intervalo_dias) 
-               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
+            """INSERT INTO tareas (chat_id, motivo, fecha_vencimiento, recordatorio_valor, recordatorio_unidad, es_secuencial, intervalo_dias, notificado) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE) RETURNING id;""",
             (chat_id, motivo, fecha_dt, rec_valor, rec_unidad, es_secuencial, intervalo_dias)
         )
         tarea_id = cur.fetchone()[0]
@@ -200,7 +204,7 @@ def db_completar_tarea(tarea_id, chat_id):
         if t and t[5]:
             intervalo = t[6] if t[6] > 0 else 1
             nueva_fecha = datetime.now() + timedelta(days=intervalo)
-            cur.execute("UPDATE tareas SET fecha_vencimiento = %s WHERE id = %s;", (nueva_fecha, tarea_id))
+            cur.execute("UPDATE tareas SET fecha_vencimiento = %s, notificado = FALSE WHERE id = %s;", (nueva_fecha, tarea_id))
             conn.commit()
             cur.close()
             conn.close()
@@ -245,7 +249,7 @@ def db_eliminar_tarea(tarea_id, chat_id):
         logger.error(f"Error eliminando tarea: {e}")
         return False
 
-# --- 2. ANTI-SLEEP / KEEP ALIVE SYSTEM ---
+# --- 2. ANTI-SLEEP & ALARM DISPATCHER SYSTEM ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -280,6 +284,63 @@ def keep_alive_ping():
                 logger.info("🔄 Ping Supabase Database OK")
             except Exception as e:
                 logger.error(f"⚠️ Error en Keep-alive Supabase: {e}")
+
+def verificar_y_enviar_alertas(application):
+    while True:
+        time.sleep(60)
+        if not DATABASE_URL:
+            continue
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, chat_id, motivo, fecha_vencimiento, recordatorio_valor, recordatorio_unidad 
+                FROM tareas 
+                WHERE estado = 'pendiente' AND notificado = FALSE AND recordatorio_valor IS NOT NULL;
+            """)
+            tareas_pendientes = cur.fetchall()
+
+            for t in tareas_pendientes:
+                tid, chat_id, motivo, f_venc, rec_val, rec_uni = t[0], t[1], t[2], t[3], t[4], t[5]
+                
+                delta = timedelta(0)
+                if rec_uni == "minutos":
+                    delta = timedelta(minutes=rec_val)
+                elif rec_uni == "horas":
+                    delta = timedelta(hours=rec_val)
+                elif rec_uni == "dias":
+                    delta = timedelta(days=rec_val)
+
+                tiempo_aviso = f_venc - delta
+
+                if datetime.now(f_venc.tzinfo) >= tiempo_aviso:
+                    kb = [
+                        [InlineKeyboardButton("✅ Completar Tarea", callback_data=f"mod_comp_{tid}")],
+                        [InlineKeyboardButton("📋 Ver Mis Tareas", callback_data="m2_listar")]
+                    ]
+                    mensaje_alerta = (
+                        f"⏰ **¡RECORDATORIO TDAH EN TU MÓVIL!** 📱\n\n"
+                        f"📌 Tarea: **{motivo}**\n"
+                        f"📅 Vence el: {f_venc.strftime('%d/%m/%Y a las %H:%M')}\n\n"
+                        f"¡Actúa ahora para mantener el foco! ⚡"
+                    )
+                    try:
+                        application.bot.send_message(
+                            chat_id=chat_id,
+                            text=mensaje_alerta,
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup(kb)
+                        )
+                        cur.execute("UPDATE tareas SET notificado = TRUE WHERE id = %s;", (tid,))
+                        conn.commit()
+                        logger.info(f"🔔 Alerta push enviada al chat {chat_id} para la tarea #{tid}")
+                    except Exception as ex:
+                        logger.error(f"❌ Error enviando alerta push al chat {chat_id}: {ex}")
+
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error en hilo de alarmas push: {e}")
 
 # --- 3. GEMINI IA INTEGRATION ---
 def consultar_gemini(prompt):
@@ -556,7 +617,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📅 Fecha: {dia:02d}/{mes:02d}/{ano}\n"
                 )
                 if rec_val:
-                    msg_confirm += f"⏰ Alarma: {rec_val} {rec_uni} antes"
+                    msg_confirm += f"⏰ Alarma programada en tu móvil: {rec_val} {rec_uni} antes"
                 
                 context.user_data["wizard"] = {}
                 await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
@@ -641,13 +702,19 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"🔄 Tarea #{tid} completada y reprogramada automáticamente.")
         else:
             await context.bot.send_message(chat_id=chat_id, text=f"🎉 ¡Tarea #{tid} completada! ¡Dopamina liberada! ⚡")
-        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
+        try:
+            await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
+        except Exception:
+            pass
 
     elif query.data.startswith("mod_elim_"):
         tid = int(query.data.split("_")[2])
         db_eliminar_tarea(tid, chat_id)
         await context.bot.send_message(chat_id=chat_id, text=f"🗑️ Tarea #{tid} eliminada.")
-        await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
+        try:
+            await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
+        except Exception:
+            pass
 
     elif query.data == "m4_ia_desglose":
         tareas = db_obtener_tareas(chat_id, "todos")
@@ -754,7 +821,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot...")
+    logger.info("Iniciando Tareas_TDAH Bot con Alertas Push en el Móvil...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
@@ -765,11 +832,14 @@ def main():
         return
 
     app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(procesar_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
 
-    logger.info("🚀 Bot activo y escuchando en Telegram.")
+    threading.Thread(target=verificar_y_enviar_alertas, args=(app,), daemon=True).start()
+
+    logger.info("🚀 Bot activo y escuchando en Telegram con alertas push automáticas.")
     app.run_polling()
 
 if __name__ == "__main__":
