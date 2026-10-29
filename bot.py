@@ -116,7 +116,6 @@ def ejecutar_rutina_limpieza_bd():
         for row in cur.fetchall():
             uid = row[0]
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
-            logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>1 día) sin tareas.")
 
         cur.execute("""
             SELECT u.chat_id FROM usuarios_actividad u
@@ -127,7 +126,6 @@ def ejecutar_rutina_limpieza_bd():
             uid = row[0]
             cur.execute("DELETE FROM tareas WHERE chat_id = %s;", (uid,))
             cur.execute("DELETE FROM usuarios_actividad WHERE chat_id = %s;", (uid,))
-            logger.info(f"🧹 Limpieza: Usuario {uid} eliminado por inactividad (>7 días) con todo completado.")
 
         cur.execute("DELETE FROM usuarios_actividad WHERE ultimo_login < NOW() - INTERVAL '30 days';")
 
@@ -270,10 +268,9 @@ def keep_alive_ping():
         time.sleep(300)
         if url:
             try:
-                r = requests.get(url, timeout=10)
-                logger.info(f"🔄 Self-ping Render OK (Status: {r.status_code})")
-            except Exception as e:
-                logger.error(f"⚠️ Error en Self-ping Render: {e}")
+                requests.get(url, timeout=10)
+            except Exception:
+                pass
         if DATABASE_URL:
             try:
                 conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
@@ -281,9 +278,8 @@ def keep_alive_ping():
                 cur.execute("SELECT 1;")
                 cur.close()
                 conn.close()
-                logger.info("🔄 Ping Supabase Database OK")
-            except Exception as e:
-                logger.error(f"⚠️ Error en Keep-alive Supabase: {e}")
+            except Exception:
+                pass
 
 def verificar_y_enviar_alertas(application):
     while True:
@@ -333,23 +329,22 @@ def verificar_y_enviar_alertas(application):
                         )
                         cur.execute("UPDATE tareas SET notificado = TRUE WHERE id = %s;", (tid,))
                         conn.commit()
-                        logger.info(f"🔔 Alerta push enviada al chat {chat_id} para la tarea #{tid}")
-                    except Exception as ex:
-                        logger.error(f"❌ Error enviando alerta push al chat {chat_id}: {ex}")
+                    except Exception:
+                        pass
 
             cur.close()
             conn.close()
-        except Exception as e:
-            logger.error(f"Error en hilo de alarmas push: {e}")
+        except Exception:
+            pass
 
-# --- 3. GEMINI IA INTEGRATION ---
+# --- 3. GEMINI IA INTEGRATION (Updated to gemini-3.8-flash) ---
 def consultar_gemini(prompt):
     if not GEMINI_API_KEY:
         return "⚠️ Configura GEMINI_API_KEY en Render para usar las funciones de IA."
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt
         )
         return response.text if response and response.text else "⚠️ Sin respuesta de la IA."
@@ -383,6 +378,9 @@ def teclado_wizard_fecha(datos):
     dia = datos.get("dia", "--")
     mes = datos.get("mes", "--")
     ano = datos.get("ano", "--")
+    hora = datos.get("hora", "09")
+    minuto = datos.get("minuto", "00")
+    ampm = datos.get("ampm", "AM")
     motivo = datos.get("motivo", "Pulsar para escribir")
 
     kb = [
@@ -391,20 +389,23 @@ def teclado_wizard_fecha(datos):
             InlineKeyboardButton(f"📆 Mes: {mes}", callback_data="w_set_mes"),
             InlineKeyboardButton(f"🗓️ Año: {ano}", callback_data="w_set_ano")
         ],
+        [
+            InlineKeyboardButton(f"🕒 Hora: {hora}:{minuto} {ampm}", callback_data="w_set_hora_menu")
+        ],
         [InlineKeyboardButton(f"📝 Motivo: {motivo}", callback_data="w_set_motivo")],
         [
             InlineKeyboardButton("➕ Añadir la Tarea", callback_data="w_guardar_tarea"),
-            InlineKeyboardButton("📅 Añadir al Calendario", callback_data="w_generar_ical"),
+            InlineKeyboardButton("📅 Google Calendar", callback_data="w_generar_ical"),
         ],
-        [InlineKeyboardButton("⏰ Añadir una Alarma", callback_data="w_toggle_alarma")]
+        [InlineKeyboardButton("⏰ Alarma Móvil", callback_data="w_toggle_alarma")]
     ]
 
     if datos.get("mostrar_alarma", False):
         rec_num = datos.get("rec_num", "15")
         rec_uni = datos.get("rec_uni", "minutos")
         kb.append([
-            InlineKeyboardButton(f"🔢 Recordatorio: [{rec_num}]", callback_data="w_set_rec_num"),
-            InlineKeyboardButton(f"{'✅ ' if rec_uni=='minutos' else ''}Minutos", callback_data="w_uni_minutos"),
+            InlineKeyboardButton(f"🔢 Alarma: [{rec_num}]", callback_data="w_set_rec_num"),
+            InlineKeyboardButton(f"{'✅ ' if rec_uni=='minutos' else ''}Min", callback_data="w_uni_minutos"),
             InlineKeyboardButton(f"{'✅ ' if rec_uni=='horas' else ''}Horas", callback_data="w_uni_horas"),
             InlineKeyboardButton(f"{'✅ ' if rec_uni=='dias' else ''}Días", callback_data="w_uni_dias")
         ])
@@ -415,17 +416,14 @@ def teclado_wizard_fecha(datos):
 # --- 5. HANDLERS TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     registrar_o_actualizar_usuario(user_id)
     ejecutar_rutina_limpieza_bd()
-
     es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
 
     welcome_text = (
         f"🧠 ¡Hola! Soy tu bot Tareas_TDAH.\n"
         f"🆔 Tu ID de usuario es: {user_id}\n\n"
-        f"Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco.\n"
-        f"Selecciona una opción del menú inferior para comenzar:"
+        f"Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco."
     )
     await update.message.reply_text(
         text=welcome_text,
@@ -441,11 +439,15 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registrar_o_actualizar_usuario(user_id)
     es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
 
+    now = datetime.now()
     if "wizard" not in context.user_data:
         context.user_data["wizard"] = {
-            "dia": str(datetime.now().day).zfill(2),
-            "mes": str(datetime.now().month).zfill(2),
-            "ano": str(datetime.now().year),
+            "dia": str(now.day).zfill(2),
+            "mes": str(now.month).zfill(2),
+            "ano": str(now.year),
+            "hora": "09",
+            "minuto": "00",
+            "ampm": "AM",
             "motivo": "Sin definir",
             "mostrar_alarma": False,
             "rec_num": "15",
@@ -463,12 +465,9 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "menu_admin":
         if not es_admin:
-            await query.answer("⛔ Acceso denegado. Solo para administradores.", show_alert=True)
+            await query.answer("⛔ Acceso denegado.", show_alert=True)
             return
-        await query.edit_message_text(
-            "🛡️ Panel de Administración\nSelecciona una opción de gestión global:",
-            reply_markup=teclado_admin()
-        )
+        await query.edit_message_text("🛡️ Panel de Administración:", reply_markup=teclado_admin())
 
     elif query.data == "admin_stats":
         if not es_admin:
@@ -480,22 +479,13 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_usuarios = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM tareas;")
             total_tareas = cur.fetchone()[0]
-            cur.execute("SELECT chat_id, ultimo_login FROM usuarios_actividad ORDER BY ultimo_login DESC LIMIT 10;")
-            usuarios = cur.fetchall()
             cur.close()
             conn.close()
-
-            msg = f"📊 Estadísticas Globales de Uso:\n\n" \
-                  f"• Usuarios totales registrados: {total_usuarios}\n" \
-                  f"• Tareas totales en BD: {total_tareas}\n\n" \
-                  f"🕒 Últimos usuarios activos:\n"
-            for u in usuarios:
-                msg += f" - ID: {u[0]} | Acceso: {u[1].strftime('%d/%m/%Y %H:%M')}\n"
-
-            kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
+            msg = f"📊 Estadísticas:\n• Usuarios: {total_usuarios}\n• Tareas: {total_tareas}"
+            kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]]
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
-            await query.edit_message_text(f"❌ Error obteniendo estadísticas: {e}", reply_markup=teclado_admin())
+            await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
     elif query.data == "admin_listar_otros":
         if not es_admin:
@@ -503,36 +493,25 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
             cur = conn.cursor()
-            cur.execute("SELECT id, chat_id, motivo, estado, fecha_vencimiento FROM tareas ORDER BY creado_en DESC LIMIT 20;")
+            cur.execute("SELECT id, chat_id, motivo, estado FROM tareas ORDER BY creado_en DESC LIMIT 15;")
             tareas = cur.fetchall()
             cur.close()
             conn.close()
-
-            msg = "👥 Listado global de tareas:\n\n"
-            if not tareas:
-                msg += "No hay tareas registradas en el sistema."
-            else:
-                for t in tareas:
-                    msg += f"• T#{t[0]} [User: {t[1]}] - {t[2]} ({t[3]})\n"
-
-            kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
+            msg = "👥 Tareas globales:\n" + ("\n".join([f"• #{t[0]} [U:{t[1]}] {t[2]} ({t[3]})" for t in tareas]) if tareas else "Vacío")
+            kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]]
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
-            await query.edit_message_text(f"❌ Error listando tareas: {e}", reply_markup=teclado_admin())
+            await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
     elif query.data == "admin_limpiar_db":
         if not es_admin:
             return
         ejecutar_rutina_limpieza_bd()
-        kb = [[InlineKeyboardButton("⬅️ Volver a Admin", callback_data="menu_admin")]]
-        await query.edit_message_text("🧹 Limpieza forzada ejecutada con éxito.", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]]
+        await query.edit_message_text("🧹 Limpieza ejecutada.", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data == "m1_crear":
-        await query.edit_message_text(
-            "➕ Menú 1: Configurar Nueva Tarea\n"
-            "Rellena los campos usando los botones antes de guardar:",
-            reply_markup=teclado_wizard_fecha(wdata)
-        )
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_dia":
         dias = list(range(1, 32))
@@ -541,12 +520,11 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i in range(0, len(dias), 7)
         ]
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="m1_crear")])
-        await query.edit_message_text("Selecciona el Día (Máximo 31):", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("Selecciona el Día:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("select_dia_"):
-        d = query.data.split("_")[2]
-        wdata["dia"] = str(d).zfill(2)
-        await query.edit_message_text("➕ Configurar Nueva Tarea", reply_markup=teclado_wizard_fecha(wdata))
+        wdata["dia"] = str(query.data.split("_")[2]).zfill(2)
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_mes":
         kb = [[InlineKeyboardButton(str(m).zfill(2), callback_data=f"select_mes_{m}") for m in range(r, r+4)] for r in range(1, 13, 4)]
@@ -554,9 +532,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Selecciona el Mes:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("select_mes_"):
-        m = query.data.split("_")[2]
-        wdata["mes"] = str(m).zfill(2)
-        await query.edit_message_text("➕ Configurar Nueva Tarea", reply_markup=teclado_wizard_fecha(wdata))
+        wdata["mes"] = str(query.data.split("_")[2]).zfill(2)
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_ano":
         a_actual = datetime.now().year
@@ -565,77 +542,133 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Selecciona el Año:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("select_ano_"):
-        a = query.data.split("_")[2]
-        wdata["ano"] = str(a)
-        await query.edit_message_text("➕ Configurar Nueva Tarea", reply_markup=teclado_wizard_fecha(wdata))
+        wdata["ano"] = str(query.data.split("_")[2])
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
+
+    # --- NUEVO PANEL DE HORAS (1-12) Y MINUTOS CADA 5 (0, 5, 10, 15...) ---
+    elif query.data == "w_set_hora_menu":
+        # Botones de horas del 1 al 12
+        kb = [
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(1, 7)],
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(7, 13)],
+            [
+                InlineKeyboardButton(f"{'✅ [AM]' if wdata.get('ampm')=='AM' else 'AM'}", callback_data="sel_ampm_AM"),
+                InlineKeyboardButton(f"{'✅ [PM]' if wdata.get('ampm')=='PM' else 'PM'}", callback_data="sel_ampm_PM")
+            ],
+            [InlineKeyboardButton("⬅️ Volver al Asistente", callback_data="m1_crear")]
+        ]
+        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("sel_h_"):
+        h_val = str(query.data.split("_")[2]).zfill(2)
+        wdata["hora"] = h_val
+        # Pasar directamente a seleccionar los minutos cada 5
+        mins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        kb = [
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('minuto')==str(m).zfill(2) else ''}{str(m).zfill(2)}", callback_data=f"sel_m_{m}") for m in mins[i:i+4]]
+            for i in range(0, len(mins), 4)
+        ]
+        kb.append([InlineKeyboardButton("⬅️ Volver a Horas", callback_data="w_set_hora_menu")])
+        await query.edit_message_text("⏱️ Selecciona los Minutos (intervalos de 5 min):", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("sel_ampm_"):
+        wdata["ampm"] = query.data.split("_")[2]
+        kb = [
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(1, 7)],
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(7, 13)],
+            [
+                InlineKeyboardButton(f"{'✅ [AM]' if wdata.get('ampm')=='AM' else 'AM'}", callback_data="sel_ampm_AM"),
+                InlineKeyboardButton(f"{'✅ [PM]' if wdata.get('ampm')=='PM' else 'PM'}", callback_data="sel_ampm_PM")
+            ],
+            [InlineKeyboardButton("⬅️ Volver al Asistente", callback_data="m1_crear")]
+        ]
+        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("sel_m_"):
+        m_val = str(query.data.split("_")[2]).zfill(2)
+        wdata["minuto"] = m_val
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_motivo":
         USER_STATES[chat_id] = "ESCRIBIENDO_MOTIVO"
-        await context.bot.send_message(chat_id=chat_id, text="✍️ Responde a este mensaje escribiendo el motivo/nombre de la tarea:")
+        await context.bot.send_message(chat_id=chat_id, text="✍️ Escribe en un mensaje el motivo o nombre de la tarea:")
 
     elif query.data == "w_toggle_alarma":
         wdata["mostrar_alarma"] = not wdata.get("mostrar_alarma", False)
-        await query.edit_message_text("➕ Configurar Nueva Tarea", reply_markup=teclado_wizard_fecha(wdata))
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data in ["w_uni_minutos", "w_uni_horas", "w_uni_dias"]:
         wdata["rec_uni"] = query.data.replace("w_uni_", "")
-        await query.edit_message_text("➕ Configurar Nueva Tarea", reply_markup=teclado_wizard_fecha(wdata))
+        await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_rec_num":
         USER_STATES[chat_id] = "ESCRIBIENDO_ALARMA_NUM"
-        await context.bot.send_message(chat_id=chat_id, text="🔢 Escribe en un mensaje el número para la alarma (ej. 10, 15, 30):")
+        await context.bot.send_message(chat_id=chat_id, text="🔢 Escribe el número de antelación para el recordatorio (ej. 10, 15, 30):")
 
     elif query.data == "w_guardar_tarea":
         try:
             dia = int(wdata['dia'])
             mes = int(wdata['mes'])
             ano = int(wdata['ano'])
+            hora_12 = int(wdata['hora'])
+            minuto = int(wdata['minuto'])
+            ampm = wdata['ampm']
+
+            # Convertir a formato 24h
+            if ampm == "PM" and hora_12 < 12:
+                hora_24 = hora_12 + 12
+            elif ampm == "AM" and hora_12 == 12:
+                hora_24 = 0
+            else:
+                hora_24 = hora_12
+
             max_dias = calendar.monthrange(ano, mes)[1]
-            
             if dia > max_dias:
-                await query.edit_message_text(
-                    f"❌ Fecha no válida: El mes {mes}/{ano} solo tiene {max_dias} días.",
-                    reply_markup=teclado_wizard_fecha(wdata)
-                )
+                await query.edit_message_text(f"❌ El mes {mes}/{ano} solo tiene {max_dias} días.", reply_markup=teclado_wizard_fecha(wdata))
                 return
 
-            fecha_str = f"{ano}-{mes:02d}-{dia:02d} 09:00:00"
+            fecha_str = f"{ano}-{mes:02d}-{dia:02d} {hora_24:02d}:{minuto:02d}:00"
             fecha_dt = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M:%S")
             rec_val = int(wdata["rec_num"]) if wdata.get("mostrar_alarma") else None
             rec_uni = wdata.get("rec_uni") if wdata.get("mostrar_alarma") else None
 
             motivo_final = wdata.get("motivo", "Sin definir")
             if motivo_final == "Sin definir":
-                await context.bot.send_message(chat_id=chat_id, text="⚠️ Recuerda asignarle un nombre/motivo a la tarea.")
+                await context.bot.send_message(chat_id=chat_id, text="⚠️ Asigna un motivo a la tarea.")
                 return
 
             tid = db_guardar_tarea(chat_id, motivo_final, fecha_dt, rec_val, rec_uni)
             if tid:
                 msg_confirm = (
-                    f"✅ ¡Tarea Guardada con Éxito en tu apartado personal!\n\n"
+                    f"✅ ¡Tarea Guardada con Éxito!\n\n"
                     f"📌 Motivo: {motivo_final}\n"
-                    f"📅 Fecha: {dia:02d}/{mes:02d}/{ano}\n"
+                    f"📅 Fecha y Hora: {dia:02d}/{mes:02d}/{ano} a las {hora_12}:{minuto:02d} {ampm}\n"
                 )
                 if rec_val:
-                    msg_confirm += f"⏰ Alarma programada en tu móvil: {rec_val} {rec_uni} antes"
+                    msg_confirm += f"⏰ Alarma móvil: {rec_val} {rec_uni} antes"
                 
                 context.user_data["wizard"] = {}
                 await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
             else:
                 await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal(es_admin))
         except Exception as e:
-            await query.edit_message_text(f"❌ Fecha u opción no válida: {e}", reply_markup=teclado_principal(es_admin))
+            await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_principal(es_admin))
 
     elif query.data == "w_generar_ical":
         try:
-            fecha_str = f"{wdata['ano']}{wdata['mes']}{wdata['dia']}T090000Z"
+            h_12 = int(wdata['hora'])
+            m_val = int(wdata['minuto'])
+            if wdata['ampm'] == "PM" and h_12 < 12:
+                h_24 = h_12 + 12
+            elif wdata['ampm'] == "AM" and h_12 == 12:
+                h_24 = 0
+            else:
+                h_24 = h_12
+            fecha_str = f"{wdata['ano']}{wdata['mes']}{wdata['dia']}T{h_24:02d}{m_val:02d}00Z"
             gcal_link = f"https://calendar.google.com/calendar/render?action=TEMPLATE&text={requests.utils.quote(wdata['motivo'])}&dates={fecha_str}/{fecha_str}"
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"📅 Añadir a Google Calendar:\n{gcal_link}"
-            )
+            await context.bot.send_message(chat_id=chat_id, text=f"📅 Añadir a Google Calendar:\n{gcal_link}")
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generando enlace: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {e}")
 
     elif query.data.startswith("m2_") or query.data == "m2_listar":
         filtro = "todos"
@@ -645,63 +678,33 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tareas = db_obtener_tareas(chat_id, filtro)
         kb_filtros = [
             [
-                InlineKeyboardButton(f"{'✅ ' if filtro=='dia' else ''}Hoy / Día", callback_data="m2_dia"),
+                InlineKeyboardButton(f"{'✅ ' if filtro=='dia' else ''}Hoy", callback_data="m2_dia"),
                 InlineKeyboardButton(f"{'✅ ' if filtro=='semana' else ''}Semana", callback_data="m2_semana"),
                 InlineKeyboardButton(f"{'✅ ' if filtro=='mes' else ''}Mes", callback_data="m2_mes"),
-                InlineKeyboardButton(f"{'✅ ' if filtro=='todos' else ''}Todos", callback_data="m2_todos")
+                InlineKeyboardButton(f"{'✅ ' if filtro=='todos' else ''}Todas", callback_data="m2_todos")
             ],
-            [InlineKeyboardButton("⬅️ Volver al Menú", callback_data="menu_principal")]
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]
         ]
-
-        if not tareas:
-            msg = f"📋 Menú 2: Listar Tareas ({filtro.upper()})\n\n🎉 No tienes tareas pendientes en este rango."
-        else:
-            msg = f"📋 Menú 2: Listar Tareas ({filtro.upper()})\nOrdenadas por cercanía (prioridad TDAH):\n\n"
-            for t in tareas:
-                f_str = t[2].strftime("%d/%m/%Y")
-                alarm_str = f"{t[3]}{t[4][0]}" if t[3] else "-"
-                sec_str = " 🔄 (Secuencial)" if t[6] else ""
-                msg += f"• #{t[0]} [{f_str}] {t[1]} (Alarma: {alarm_str}){sec_str}\n"
-
+        msg = f"📋 Tareas ({filtro.upper()}):\n\n" + ("\n".join([f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}" for t in tareas]) if tareas else "🎉 Sin tareas pendientes.")
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
     elif query.data.startswith("m3_") or query.data == "m3_modificar":
-        filtro = "todos"
-        if query.data.startswith("m3_f_"):
-            filtro = query.data.replace("m3_f_", "")
-
-        tareas = db_obtener_tareas(chat_id, filtro)
-        kb = [
-            [
-                InlineKeyboardButton(f"{'✅ ' if filtro=='dia' else ''}Día", callback_data="m3_f_dia"),
-                InlineKeyboardButton(f"{'✅ ' if filtro=='semana' else ''}Semana", callback_data="m3_f_semana"),
-                InlineKeyboardButton(f"{'✅ ' if filtro=='mes' else ''}Mes", callback_data="m3_f_mes")
-            ]
-        ]
-
-        msg = "✏️ Menú 3: Modificar Tareas\nSelecciona la tarea a completar o eliminar:\n\n"
-        if not tareas:
-            msg += "✨ No hay tareas pendientes."
-        else:
-            for t in tareas:
-                f_str = t[2].strftime("%d/%m")
-                sec_str = " 🔄" if t[6] else ""
-                msg += f"📌 #{t[0]} [{f_str}] {t[1]}{sec_str}\n"
-                kb.append([
-                    InlineKeyboardButton(f"✅ Completar #{t[0]}", callback_data=f"mod_comp_{t[0]}"),
-                    InlineKeyboardButton(f"🗑️ Eliminar #{t[0]}", callback_data=f"mod_elim_{t[0]}")
-                ])
-
-        kb.append([InlineKeyboardButton("⬅️ Volver al Menú", callback_data="menu_principal")])
+        tareas = db_obtener_tareas(chat_id, "todos")
+        kb = []
+        msg = "✏️ Modificar o Completar Tareas:\n\n" + ("Selecciona:" if tareas else "✨ No hay tareas pendientes.")
+        for t in tareas:
+            msg += f"📌 #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}\n"
+            kb.append([
+                InlineKeyboardButton(f"✅ #{t[0]} Hecha", callback_data=f"mod_comp_{t[0]}"),
+                InlineKeyboardButton(f"🗑️ #{t[0]} Borrar", callback_data=f"mod_elim_{t[0]}")
+            ])
+        kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("mod_comp_"):
         tid = int(query.data.split("_")[2])
-        res = db_completar_tarea(tid, chat_id)
-        if res == "reprogramada":
-            await context.bot.send_message(chat_id=chat_id, text=f"🔄 Tarea #{tid} completada y reprogramada automáticamente.")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=f"🎉 ¡Tarea #{tid} completada! ¡Dopamina liberada! ⚡")
+        db_completar_tarea(tid, chat_id)
+        await context.bot.send_message(chat_id=chat_id, text=f"🎉 ¡Tarea #{tid} completada! Dopamina liberada ⚡")
         try:
             await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
         except Exception:
@@ -719,66 +722,48 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "m4_ia_desglose":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("🧩 Menú 4: IA Anti-Parálisis\n\nNo tienes tareas pendientes para desglosar.", reply_markup=teclado_principal(es_admin))
+            await query.edit_message_text("🧩 IA Anti-Parálisis: Sin tareas pendientes.", reply_markup=teclado_principal(es_admin))
             return
-
-        kb = [[InlineKeyboardButton(f"🧩 Desglosar: {t[1][:25]}...", callback_data=f"ia_desg_{t[0]}")] for t in tareas[:5]]
+        kb = [[InlineKeyboardButton(f"🧩 Desglosar: {t[1][:22]}...", callback_data=f"ia_desg_{t[0]}")] for t in tareas[:5]]
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
-        await query.edit_message_text(
-            "🧩 Menú 4: Desglose Inteligente TDAH (Micro-pasos)\n"
-            "Elige la tarea que te da pereza o bloqueo:",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        await query.edit_message_text("🧩 Elige la tarea bloqueante:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("ia_desg_"):
         tid = int(query.data.split("_")[2])
         tareas = db_obtener_tareas(chat_id, "todos")
         tarea_sel = next((t for t in tareas if t[0] == tid), None)
-
         if tarea_sel:
-            await context.bot.send_message(chat_id=chat_id, text="🧠 Gemini fragmentando tarea...")
-            prompt = (
-                f"Actúa como un experto en TDAH. La persona tiene bloqueada esta tarea: '{tarea_sel[1]}'. "
-                f"Divide esta tarea en exactamente 3 micro-pasos absurdamente sencillos de menos de 5 minutos."
-            )
+            await context.bot.send_message(chat_id=chat_id, text="🧠 Gemini fragmentando tarea en micro-pasos...")
+            prompt = f"Actúa como experto TDAH. Divide la tarea '{tarea_sel[1]}' en 3 micro-pasos de menos de 5 minutos."
             res = consultar_gemini(prompt)
-            await context.bot.send_message(chat_id=chat_id, text=f"🧩 Plan Micro-pasos Anti-Bloqueo:\n\n{res}")
+            await context.bot.send_message(chat_id=chat_id, text=f"🧩 Micro-pasos:\n\n{res}")
 
     elif query.data == "m5_ia_dopamina":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("⚡ Menú 5: Coach de Dopamina\n\n¡No tienes tareas pendientes!", reply_markup=teclado_principal(es_admin))
+            await query.edit_message_text("⚡ Coach Dopamina: Sin tareas.", reply_markup=teclado_principal(es_admin))
             return
-
-        resumen_tareas = "\n".join([f"- {t[1]} (Fecha: {t[2].strftime('%d/%m')})" for t in tareas[:7]])
-        await context.bot.send_message(chat_id=chat_id, text="⚡ Calculando Puntos de Experiencia (XP)...")
-        prompt = (
-            f"Actúa como un Coach de Gamificación e Hiperfoco TDAH. Tareas pendientes:\n{resumen_tareas}\n"
-            f"1. Asigna XP.\n2. Elige la tarea ideal para empezar AHORA.\n3. Mensaje corto de hiperfoco."
-        )
+        resumen = "\n".join([f"- {t[1]}" for t in tareas[:7]])
+        await context.bot.send_message(chat_id=chat_id, text="⚡ Analizando con Gemini...")
+        prompt = f"Actúa como Coach TDAH con gamificación. Tareas:\n{resumen}\n1. Asigna XP.\n2. Elige la tarea ideal para empezar AHORA."
         res = consultar_gemini(prompt)
-        await context.bot.send_message(chat_id=chat_id, text=f"⚡ Sistema de Gamificación & Dopamina:\n\n{res}")
+        await context.bot.send_message(chat_id=chat_id, text=f"⚡ Coach Dopamina & Foco:\n\n{res}")
 
     elif query.data == "m6_secuencial":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
-            await query.edit_message_text("🔄 Menú 6: Tareas Secuenciales\n\nNo tienes tareas creadas.", reply_markup=teclado_principal(es_admin))
+            await query.edit_message_text("🔄 Tareas Secuenciales: Sin tareas.", reply_markup=teclado_principal(es_admin))
             return
-
-        kb = [[InlineKeyboardButton(f"🔄 Secuencial: {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
+        kb = [[InlineKeyboardButton(f"🔄 {t[1][:25]}...", callback_data=f"sec_sel_{t[0]}")] for t in tareas[:5]]
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
-        await query.edit_message_text(
-            "🔄 Menú 6: Convertir Tarea en Rutina Secuencial\n"
-            "Selecciona una tarea para fijarle una frecuencia automática:",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
+        await query.edit_message_text("🔄 Selecciona tarea para automatizar frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("sec_sel_"):
         tid = int(query.data.split("_")[2])
         kb = [
-            [InlineKeyboardButton("📆 Diaria (Cada 1 día)", callback_data=f"sec_freq_{tid}_1")],
-            [InlineKeyboardButton("📅 Semanal (Cada 7 días)", callback_data=f"sec_freq_{tid}_7")],
-            [InlineKeyboardButton("🗓️ Mensual (Cada 30 días)", callback_data=f"sec_freq_{tid}_30")],
+            [InlineKeyboardButton("📆 Diaria (1 día)", callback_data=f"sec_freq_{tid}_1")],
+            [InlineKeyboardButton("📅 Semanal (7 días)", callback_data=f"sec_freq_{tid}_7")],
+            [InlineKeyboardButton("🗓️ Mensual (30 días)", callback_data=f"sec_freq_{tid}_30")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
         ]
         await query.edit_message_text("Selecciona la frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
@@ -788,58 +773,46 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(parts[2])
         intervalo = int(parts[3])
         db_hacer_secuencial(tid, intervalo, chat_id)
-        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como Rutina Secuencial!", reply_markup=teclado_principal(es_admin))
+        await query.edit_message_text(f"✅ ¡Tarea #{tid} configurada como secuencia recurrente!", reply_markup=teclado_principal(es_admin))
 
 # --- 6. TEXT INPUT HANDLER ---
 async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in USER_STATES:
         return
-
     estado = USER_STATES.get(chat_id)
-
     if estado == "ESCRIBIENDO_MOTIVO":
         if "wizard" not in context.user_data:
             context.user_data["wizard"] = {}
         context.user_data["wizard"]["motivo"] = update.message.text
         USER_STATES.pop(chat_id, None)
-        await update.message.reply_text(
-            "✅ Motivo guardado. Pulsa sobre el menú para continuar:",
-            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
-        )
-
+        await update.message.reply_text("✅ Motivo guardado:", reply_markup=teclado_wizard_fecha(context.user_data["wizard"]))
     elif estado == "ESCRIBIENDO_ALARMA_NUM":
         if "wizard" not in context.user_data:
             context.user_data["wizard"] = {}
         text = "".join(filter(str.isdigit, update.message.text))
         context.user_data["wizard"]["rec_num"] = text if text else "15"
         USER_STATES.pop(chat_id, None)
-        await update.message.reply_text(
-            "✅ Número de alarma actualizado. Pulsa sobre el menú:",
-            reply_markup=teclado_wizard_fecha(context.user_data["wizard"])
-        )
+        await update.message.reply_text("✅ Alarma actualizada:", reply_markup=teclado_wizard_fecha(context.user_data["wizard"]))
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Alertas Push en el Móvil...")
+    logger.info("Iniciando Tareas_TDAH Bot con Panel de Hora/Minutos y Gemini Actualizado...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
     if not TOKEN:
-        logger.critical("❌ ERROR: TELEGRAM_TOKEN no configurado.")
         return
 
     app = Application.builder().token(TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(procesar_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
 
     threading.Thread(target=verificar_y_enviar_alertas, args=(app,), daemon=True).start()
 
-    logger.info("🚀 Bot activo y escuchando en Telegram con alertas push automáticas.")
     app.run_polling()
 
 if __name__ == "__main__":
