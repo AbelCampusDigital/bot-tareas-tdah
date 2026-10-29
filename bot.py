@@ -395,7 +395,8 @@ def teclado_admin():
     keyboard = [
         [InlineKeyboardButton("📊 1. Estadísticas de Usuarios", callback_data="admin_stats")],
         [InlineKeyboardButton("👥 2. Listar Tareas de Otros", callback_data="admin_listar_otros")],
-        [InlineKeyboardButton("🧹 3. Forzar Limpieza / Borrar", callback_data="admin_limpiar_db")],
+        [InlineKeyboardButton("🧪 3. Pruebas de Alarma", callback_data="admin_pruebas")],
+        [InlineKeyboardButton("🧹 4. Forzar Limpieza / Borrar", callback_data="admin_limpiar_db")],
         [InlineKeyboardButton("⬅️ Volver al Menú Principal", callback_data="menu_principal")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -542,6 +543,48 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
+
+    # --- MENÚ DE PRUEBAS DE ALARMA (Punto 3) ---
+    elif query.data == "admin_pruebas":
+        if not es_admin:
+            return
+        kb = [
+            [InlineKeyboardButton("⚡ Alarma Inmediata", callback_data="test_alarm_now")],
+            [InlineKeyboardButton("⏱️ Alarma en 5 Minutos", callback_data="test_alarm_5m")],
+            [InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]
+        ]
+        await query.edit_message_text("🧪 **Menú de Pruebas de Alarma**\nPrueba los recordatorios en tu móvil:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data == "test_alarm_now":
+        if not es_admin:
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏰ **[PRUEBA] ¡Alarma Inmediata en tu móvil!** 📱\n\nEl sistema de avisos funciona correctamente. ⚡",
+                parse_mode="Markdown"
+            )
+            await query.answer("✅ Alarma inmediata enviada con éxito.", show_alert=True)
+        except Exception as e:
+            await query.answer(f"❌ Error: {e}", show_alert=True)
+
+    elif query.data == "test_alarm_5m":
+        if not es_admin:
+            return
+        await query.answer("⏱️ Alarma programada para dentro de 5 minutos.", show_alert=True)
+        
+        async def tarea_alarma_5m():
+            await asyncio.sleep(300) # 5 minutos
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⏰ **[PRUEBA] ¡Alarma de los 5 minutos!** 📱\n\nEl temporizador asíncrono ha saltado perfectamente. ⚡",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        
+        asyncio.create_task(tarea_alarma_5m())
 
     elif query.data == "admin_limpiar_db":
         if not es_admin:
@@ -727,6 +770,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {e}")
 
+    # --- PUNTO 1 & 2: LISTAR TAREAS CON FORMATO SECUENCIAL Y TÍTULOS DE SEMANA/MES ---
     elif query.data.startswith("m2_") or query.data == "m2_listar":
         filtro = "todos"
         if "_" in query.data and query.data != "m2_listar":
@@ -742,29 +786,67 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]
         ]
-        msg = f"📋 Tareas ({filtro.upper()}):\n\n" + ("\n".join([f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}" for t in tareas]) if tareas else "🎉 Sin tareas pendientes.")
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
-    # --- NUEVO MENÚ: LISTAR ALARMAS ASOCIADAS A TAREAS ---
+        meses_es = {
+            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+            7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+        }
+
+        msg = f"📋 Tareas ({filtro.upper()}):\n\n"
+        if tareas:
+            if filtro == "semana":
+                grupos = {}
+                for t in tareas:
+                    # t[2] es fecha_vencimiento
+                    sem = t[2].isocalendar()[1]
+                    grupos.setdefault(sem, []).append(t)
+                for sem, lista in sorted(grupos.items()):
+                    msg += f"📌 **--- Semana {sem} ---**\n"
+                    for t in lista:
+                        sec_txt = " [🔄 Secuencial]" if t[6] else ""
+                        msg += f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}{sec_txt}\n"
+                    msg += "\n"
+            elif filtro == "mes":
+                grupos = {}
+                for t in tareas:
+                    m_num = t[2].month
+                    grupos.setdefault(m_num, []).append(t)
+                for m_num, lista in sorted(grupos.items()):
+                    nombre_mes = meses_es.get(m_num, str(m_num))
+                    msg += f"📅 **--- {nombre_mes} ---**\n"
+                    for t in lista:
+                        sec_txt = " [🔄 Secuencial]" if t[6] else ""
+                        msg += f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}{sec_txt}\n"
+                    msg += "\n"
+            else:
+                for t in tareas:
+                    sec_txt = " [🔄 Secuencial]" if t[6] else ""
+                    msg += f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}{sec_txt}\n"
+        else:
+            msg += "🎉 Sin tareas pendientes."
+
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_filtros))
+
+    # --- PUNTO 1: LISTAR SÓLO ALARMAS QUE TIENEN ALARMA ---
     elif query.data == "m3_alarmas":
         tareas = db_obtener_tareas(chat_id, "todos")
+        # Filtrar únicamente las tareas que tienen recordatorio_valor NOT NULL
+        tareas_con_alarma = [t for t in tareas if t[3] is not None]
+        
         msg = "⏰ **Alarmas asociadas a tus tareas pendientes:**\n\n"
-        if tareas:
-            for t in tareas:
+        if tareas_con_alarma:
+            for t in tareas_con_alarma:
                 tid, motivo, f_venc, rec_val, rec_uni = t[0], t[1], t[2], t[3], t[4]
-                if rec_val is not None:
-                    if rec_uni == "minutos":
-                        alarma_desc = f"{rec_val} minutos antes"
-                    elif rec_uni == "horas":
-                        alarma_desc = f"{rec_val} hora(s) antes"
-                    else:
-                        alarma_desc = f"{rec_val} {rec_uni}"
+                if rec_uni == "minutos":
+                    alarma_desc = f"{rec_val} minutos antes"
+                elif rec_uni == "horas":
+                    alarma_desc = f"{rec_val} hora(s) antes"
                 else:
-                    alarma_desc = "Sin alarma programada"
+                    alarma_desc = f"{rec_val} {rec_uni}"
                 
                 msg += f"📌 **#{tid}** {motivo}\n   📅 Vence: {f_venc.strftime('%d/%m/%Y %H:%M')}\n   ⏰ Alarma: **{alarma_desc}**\n\n"
         else:
-            msg += "🎉 No tienes tareas pendientes ni alarmas activas."
+            msg += "🎉 No tienes ninguna tarea con alarma configurada."
 
         kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]]
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
@@ -775,7 +857,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = []
         msg = "✏️ Modificar, Completar o Poner Alarma a Tareas:\n\n" + ("Selecciona una acción:" if tareas else "✨ No hay tareas pendientes.")
         for t in tareas:
-            msg += f"📌 #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}\n"
+            sec_txt = " [🔄 Secuencial]" if t[6] else ""
+            msg += f"📌 #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}{sec_txt}\n"
             kb.append([
                 InlineKeyboardButton(f"✅ #{t[0]} Hecha", callback_data=f"mod_comp_{t[0]}"),
                 InlineKeyboardButton(f"⏰ #{t[0]} Alarma", callback_data=f"mod_alarm_menu_{t[0]}"),
@@ -853,7 +936,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tarea_sel:
             await query.edit_message_text("🧠 Gemini fragmentando tarea en micro-pasos...")
             prompt = f"Actúa como experto TDAH. Divide la tarea '{tarea_sel[1]}' en 3 micro-pasos de menos de 5 minutos."
-            # Llamada no bloqueante con asyncio.to_thread para evitar congelar el bot
             res = await asyncio.to_thread(consultar_gemini, prompt)
             await context.bot.send_message(chat_id=chat_id, text=f"🧩 Micro-pasos:\n\n{res}")
 
@@ -865,7 +947,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resumen = "\n".join([f"- {t[1]}" for t in tareas[:7]])
         await query.edit_message_text("⚡ Analizando con Gemini...")
         prompt = f"Actúa como Coach TDAH con gamificación. Tareas:\n{resumen}\n1. Asigna XP.\n2. Elige la tarea ideal para empezar AHORA."
-        # Llamada no bloqueante con asyncio.to_thread para evitar congelar el bot
         res = await asyncio.to_thread(consultar_gemini, prompt)
         await context.bot.send_message(chat_id=chat_id, text=f"⚡ Coach Dopamina & Foco:\n\n{res}")
 
@@ -917,7 +998,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Listado de Alarmas y Asincronía IA...")
+    logger.info("Iniciando Tareas_TDAH Bot con Mejoras de Listado y Pruebas de Alarma...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
