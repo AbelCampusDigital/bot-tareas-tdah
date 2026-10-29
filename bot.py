@@ -217,6 +217,21 @@ def db_completar_tarea(tarea_id, chat_id):
         logger.error(f"Error completando tarea: {e}")
         return False
 
+def db_actualizar_alarma_tarea(tarea_id, chat_id, rec_valor, rec_unidad):
+    if not DATABASE_URL:
+        return False
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        cur = conn.cursor()
+        cur.execute("UPDATE tareas SET recordatorio_valor = %s, recordatorio_unidad = %s, notificado = FALSE WHERE id = %s AND chat_id = %s;", (rec_valor, rec_unidad, tarea_id, chat_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error actualizando alarma de tarea: {e}")
+        return False
+
 def db_hacer_secuencial(tarea_id, intervalo_dias, chat_id):
     if not DATABASE_URL:
         return False
@@ -337,14 +352,12 @@ def verificar_y_enviar_alertas(application):
         except Exception:
             pass
 
-# --- 3. GEMINI IA INTEGRATION (Fixed with robust fallback model for 503/404 errors) ---
+# --- 3. GEMINI IA INTEGRATION (Robust fallback model for 503/404 errors) ---
 def consultar_gemini(prompt):
     if not GEMINI_API_KEY:
         return "⚠️ Configura GEMINI_API_KEY en Render para usar las funciones de IA."
     
-    # Lista de modelos estables a probar en orden para evitar errores 503 o 404
     modelos_a_probar = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-3.8-flash"]
-    
     client = genai.Client(api_key=GEMINI_API_KEY)
     ultimo_error = ""
     
@@ -394,7 +407,6 @@ def teclado_wizard_fecha(datos):
     ampm = datos.get("ampm", "AM")
     motivo = datos.get("motivo", "Pulsar para escribir")
 
-    # Conversión a formato 24h para el visor (Punto 2)
     try:
         h_12 = int(hora)
         m_val = int(minuto)
@@ -426,7 +438,7 @@ def teclado_wizard_fecha(datos):
     ]
 
     if datos.get("mostrar_alarma", False):
-        rec_val = datos.get("rec_val", 0) # 0 = En hora, 15 = 15MntAntes, 30 = 30mitAntes, 60 = 1horaantes
+        rec_val = datos.get("rec_val", 15)
         kb.append([
             InlineKeyboardButton(f"{'✅ ' if rec_val==0 else ''}En hora", callback_data="alarm_val_0"),
             InlineKeyboardButton(f"{'✅ ' if rec_val==15 else ''}15MntAntes", callback_data="alarm_val_15")
@@ -571,7 +583,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wdata["ano"] = str(query.data.split("_")[2])
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
-    # --- PUNTO 1 & 2: PANEL DE HORAS CON BOTÓN EXPLÍCITO A MINUTOS ---
     elif query.data == "w_set_hora_menu":
         kb = [
             [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(1, 7)],
@@ -597,7 +608,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("sel_h_"):
         h_val = str(query.data.split("_")[2]).zfill(2)
         wdata["hora"] = h_val
-        # Auto-salto a minutos (Punto 1) pero con botón explícito por si acaso
         mins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
         kb = [
             [InlineKeyboardButton(f"{'✅ ' if wdata.get('minuto')==str(m).zfill(2) else ''}{str(m).zfill(2)}", callback_data=f"sel_m_{m}") for m in mins[i:i+4]]
@@ -633,7 +643,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wdata["mostrar_alarma"] = not wdata.get("mostrar_alarma", False)
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
-    # --- PUNTO 3: NUEVOS BOTONES DE ALARMA MÓVIL ---
     elif query.data.startswith("alarm_val_"):
         val = int(query.data.split("_")[2])
         wdata["rec_val"] = val
@@ -650,10 +659,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             wdata["rec_num"] = 1
             wdata["rec_uni"] = "horas"
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
-
-    elif query.data == "w_set_rec_num":
-        USER_STATES[chat_id] = "ESCRIBIENDO_ALARMA_NUM"
-        await context.bot.send_message(chat_id=chat_id, text="🔢 Escribe los minutos exactos de antelación para el recordatorio:")
 
     elif query.data == "w_guardar_tarea":
         try:
@@ -738,18 +743,55 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📋 Tareas ({filtro.upper()}):\n\n" + ("\n".join([f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}" for t in tareas]) if tareas else "🎉 Sin tareas pendientes.")
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
+    # --- MODIFICAR TAREAS CON BOTÓN DE ALARMA MÓVIL ---
     elif query.data.startswith("m3_") or query.data == "m3_modificar":
         tareas = db_obtener_tareas(chat_id, "todos")
         kb = []
-        msg = "✏️ Modificar o Completar Tareas:\n\n" + ("Selecciona:" if tareas else "✨ No hay tareas pendientes.")
+        msg = "✏️ Modificar, Completar o Poner Alarma a Tareas:\n\n" + ("Selecciona una acción:" if tareas else "✨ No hay tareas pendientes.")
         for t in tareas:
             msg += f"📌 #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}\n"
             kb.append([
                 InlineKeyboardButton(f"✅ #{t[0]} Hecha", callback_data=f"mod_comp_{t[0]}"),
+                InlineKeyboardButton(f"⏰ #{t[0]} Alarma", callback_data=f"mod_alarm_menu_{t[0]}"),
                 InlineKeyboardButton(f"🗑️ #{t[0]} Borrar", callback_data=f"mod_elim_{t[0]}")
             ])
         kb.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")])
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("mod_alarm_menu_"):
+        tid = int(query.data.split("_")[3])
+        kb = [
+            [
+                InlineKeyboardButton("En hora", callback_data=f"set_t_alarm_{tid}_0"),
+                InlineKeyboardButton("15MntAntes", callback_data=f"set_t_alarm_{tid}_15")
+            ],
+            [
+                InlineKeyboardButton("30mitAntes", callback_data=f"set_t_alarm_{tid}_30"),
+                InlineKeyboardButton("1horaantes", callback_data=f"set_t_alarm_{tid}_60")
+            ],
+            [InlineKeyboardButton("⬅️ Volver a Modificar", callback_data="m3_modificar")]
+        ]
+        await query.edit_message_text(f"⏰ Selecciona la Alarma Móvil para la Tarea #{tid}:", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data.startswith("set_t_alarm_"):
+        parts = query.data.split("_")
+        tid = int(parts[3])
+        val = int(parts[4])
+        
+        if val == 0:
+            db_actualizar_alarma_tarea(tid, chat_id, None, None)
+        elif val == 15:
+            db_actualizar_alarma_tarea(tid, chat_id, 15, "minutos")
+        elif val == 30:
+            db_actualizar_alarma_tarea(tid, chat_id, 30, "minutos")
+        elif val == 60:
+            db_actualizar_alarma_tarea(tid, chat_id, 1, "horas")
+
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ ¡Alarma configurada con éxito para la Tarea #{tid}!")
+        try:
+            await query.edit_message_text("✏️ Modificar Tareas", reply_markup=teclado_principal(es_admin))
+        except Exception:
+            pass
 
     elif query.data.startswith("mod_comp_"):
         tid = int(query.data.split("_")[2])
@@ -847,7 +889,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Correcciones Solicitadas...")
+    logger.info("Iniciando Tareas_TDAH Bot con gestión de Alarmas por Tarea...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
@@ -863,9 +905,6 @@ def main():
 
     threading.Thread(target=verificar_y_enviar_alertas, args=(app,), daemon=True).start()
 
-    app.run_polling()
-
-if __name__ == "__main__":
     app.run_polling()
 
 if __name__ == "__main__":
