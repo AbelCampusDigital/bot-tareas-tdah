@@ -337,19 +337,30 @@ def verificar_y_enviar_alertas(application):
         except Exception:
             pass
 
-# --- 3. GEMINI IA INTEGRATION (Updated to gemini-3.8-flash) ---
+# --- 3. GEMINI IA INTEGRATION (Fixed with robust fallback model for 503/404 errors) ---
 def consultar_gemini(prompt):
     if not GEMINI_API_KEY:
         return "⚠️ Configura GEMINI_API_KEY en Render para usar las funciones de IA."
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
-        )
-        return response.text if response and response.text else "⚠️ Sin respuesta de la IA."
-    except Exception as e:
-        return f"❌ Error llamando a Gemini IA: {str(e)}"
+    
+    # Lista de modelos estables a probar en orden para evitar errores 503 o 404
+    modelos_a_probar = ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-3.8-flash"]
+    
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    ultimo_error = ""
+    
+    for modelo in modelos_a_probar:
+        try:
+            response = client.models.generate_content(
+                model=modelo,
+                contents=prompt
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            ultimo_error = str(e)
+            continue
+            
+    return f"❌ Error llamando a Gemini IA: {ultimo_error}"
 
 # --- 4. TELEGRAM KEYBOARDS & MENUS ---
 def teclado_principal(es_admin=False):
@@ -383,6 +394,20 @@ def teclado_wizard_fecha(datos):
     ampm = datos.get("ampm", "AM")
     motivo = datos.get("motivo", "Pulsar para escribir")
 
+    # Conversión a formato 24h para el visor (Punto 2)
+    try:
+        h_12 = int(hora)
+        m_val = int(minuto)
+        if ampm == "PM" and h_12 < 12:
+            h_24 = h_12 + 12
+        elif ampm == "AM" and h_12 == 12:
+            h_24 = 0
+        else:
+            h_24 = h_12
+        hora_visor = f"{h_24:02d}:{m_val:02d} horas"
+    except Exception:
+        hora_visor = f"{hora}:{minuto} {ampm}"
+
     kb = [
         [
             InlineKeyboardButton(f"📅 Día: {dia}", callback_data="w_set_dia"),
@@ -390,7 +415,7 @@ def teclado_wizard_fecha(datos):
             InlineKeyboardButton(f"🗓️ Año: {ano}", callback_data="w_set_ano")
         ],
         [
-            InlineKeyboardButton(f"🕒 Hora: {hora}:{minuto} {ampm}", callback_data="w_set_hora_menu")
+            InlineKeyboardButton(f"🕒 Hora: {hora_visor}", callback_data="w_set_hora_menu")
         ],
         [InlineKeyboardButton(f"📝 Motivo: {motivo}", callback_data="w_set_motivo")],
         [
@@ -401,13 +426,14 @@ def teclado_wizard_fecha(datos):
     ]
 
     if datos.get("mostrar_alarma", False):
-        rec_num = datos.get("rec_num", "15")
-        rec_uni = datos.get("rec_uni", "minutos")
+        rec_val = datos.get("rec_val", 0) # 0 = En hora, 15 = 15MntAntes, 30 = 30mitAntes, 60 = 1horaantes
         kb.append([
-            InlineKeyboardButton(f"🔢 Alarma: [{rec_num}]", callback_data="w_set_rec_num"),
-            InlineKeyboardButton(f"{'✅ ' if rec_uni=='minutos' else ''}Min", callback_data="w_uni_minutos"),
-            InlineKeyboardButton(f"{'✅ ' if rec_uni=='horas' else ''}Horas", callback_data="w_uni_horas"),
-            InlineKeyboardButton(f"{'✅ ' if rec_uni=='dias' else ''}Días", callback_data="w_uni_dias")
+            InlineKeyboardButton(f"{'✅ ' if rec_val==0 else ''}En hora", callback_data="alarm_val_0"),
+            InlineKeyboardButton(f"{'✅ ' if rec_val==15 else ''}15MntAntes", callback_data="alarm_val_15")
+        ])
+        kb.append([
+            InlineKeyboardButton(f"{'✅ ' if rec_val==30 else ''}30mitAntes", callback_data="alarm_val_30"),
+            InlineKeyboardButton(f"{'✅ ' if rec_val==60 else ''}1horaantes", callback_data="alarm_val_60")
         ])
 
     kb.append([InlineKeyboardButton("⬅️ Cancelar / Volver", callback_data="menu_principal")])
@@ -450,7 +476,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ampm": "AM",
             "motivo": "Sin definir",
             "mostrar_alarma": False,
-            "rec_num": "15",
+            "rec_val": 15,
             "rec_uni": "minutos"
         }
 
@@ -545,9 +571,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wdata["ano"] = str(query.data.split("_")[2])
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
-    # --- NUEVO PANEL DE HORAS (1-12) Y MINUTOS CADA 5 (0, 5, 10, 15...) ---
+    # --- PUNTO 1 & 2: PANEL DE HORAS CON BOTÓN EXPLÍCITO A MINUTOS ---
     elif query.data == "w_set_hora_menu":
-        # Botones de horas del 1 al 12
         kb = [
             [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(1, 7)],
             [InlineKeyboardButton(f"{'✅ ' if wdata.get('hora')==str(h).zfill(2) else ''}{h}", callback_data=f"sel_h_{h}") for h in range(7, 13)],
@@ -555,14 +580,24 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(f"{'✅ [AM]' if wdata.get('ampm')=='AM' else 'AM'}", callback_data="sel_ampm_AM"),
                 InlineKeyboardButton(f"{'✅ [PM]' if wdata.get('ampm')=='PM' else 'PM'}", callback_data="sel_ampm_PM")
             ],
+            [InlineKeyboardButton("⏱️ Siguiente: Elegir Minutos ➡️", callback_data="go_to_minutes")],
             [InlineKeyboardButton("⬅️ Volver al Asistente", callback_data="m1_crear")]
         ]
-        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')}:{wdata.get('minuto')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data == "go_to_minutes":
+        mins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+        kb = [
+            [InlineKeyboardButton(f"{'✅ ' if wdata.get('minuto')==str(m).zfill(2) else ''}{str(m).zfill(2)}", callback_data=f"sel_m_{m}") for m in mins[i:i+4]]
+            for i in range(0, len(mins), 4)
+        ]
+        kb.append([InlineKeyboardButton("⬅️ Volver a Horas", callback_data="w_set_hora_menu")])
+        await query.edit_message_text("⏱️ Selecciona los Minutos (intervalos de 5 min):", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("sel_h_"):
         h_val = str(query.data.split("_")[2]).zfill(2)
         wdata["hora"] = h_val
-        # Pasar directamente a seleccionar los minutos cada 5
+        # Auto-salto a minutos (Punto 1) pero con botón explícito por si acaso
         mins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
         kb = [
             [InlineKeyboardButton(f"{'✅ ' if wdata.get('minuto')==str(m).zfill(2) else ''}{str(m).zfill(2)}", callback_data=f"sel_m_{m}") for m in mins[i:i+4]]
@@ -580,9 +615,10 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(f"{'✅ [AM]' if wdata.get('ampm')=='AM' else 'AM'}", callback_data="sel_ampm_AM"),
                 InlineKeyboardButton(f"{'✅ [PM]' if wdata.get('ampm')=='PM' else 'PM'}", callback_data="sel_ampm_PM")
             ],
+            [InlineKeyboardButton("⏱️ Siguiente: Elegir Minutos ➡️", callback_data="go_to_minutes")],
             [InlineKeyboardButton("⬅️ Volver al Asistente", callback_data="m1_crear")]
         ]
-        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(f"🕒 Selecciona la Hora (1-12) y AM/PM:\nActual: {wdata.get('hora')}:{wdata.get('minuto')} {wdata.get('ampm')}", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data.startswith("sel_m_"):
         m_val = str(query.data.split("_")[2]).zfill(2)
@@ -597,13 +633,27 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wdata["mostrar_alarma"] = not wdata.get("mostrar_alarma", False)
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
-    elif query.data in ["w_uni_minutos", "w_uni_horas", "w_uni_dias"]:
-        wdata["rec_uni"] = query.data.replace("w_uni_", "")
+    # --- PUNTO 3: NUEVOS BOTONES DE ALARMA MÓVIL ---
+    elif query.data.startswith("alarm_val_"):
+        val = int(query.data.split("_")[2])
+        wdata["rec_val"] = val
+        if val == 0:
+            wdata["rec_num"] = None
+            wdata["rec_uni"] = None
+        elif val == 15:
+            wdata["rec_num"] = 15
+            wdata["rec_uni"] = "minutos"
+        elif val == 30:
+            wdata["rec_num"] = 30
+            wdata["rec_uni"] = "minutos"
+        elif val == 60:
+            wdata["rec_num"] = 1
+            wdata["rec_uni"] = "horas"
         await query.edit_message_text("➕ Configurar Nueva Tarea:", reply_markup=teclado_wizard_fecha(wdata))
 
     elif query.data == "w_set_rec_num":
         USER_STATES[chat_id] = "ESCRIBIENDO_ALARMA_NUM"
-        await context.bot.send_message(chat_id=chat_id, text="🔢 Escribe el número de antelación para el recordatorio (ej. 10, 15, 30):")
+        await context.bot.send_message(chat_id=chat_id, text="🔢 Escribe los minutos exactos de antelación para el recordatorio:")
 
     elif query.data == "w_guardar_tarea":
         try:
@@ -614,7 +664,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minuto = int(wdata['minuto'])
             ampm = wdata['ampm']
 
-            # Convertir a formato 24h
             if ampm == "PM" and hora_12 < 12:
                 hora_24 = hora_12 + 12
             elif ampm == "AM" and hora_12 == 12:
@@ -629,8 +678,9 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             fecha_str = f"{ano}-{mes:02d}-{dia:02d} {hora_24:02d}:{minuto:02d}:00"
             fecha_dt = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M:%S")
-            rec_val = int(wdata["rec_num"]) if wdata.get("mostrar_alarma") else None
-            rec_uni = wdata.get("rec_uni") if wdata.get("mostrar_alarma") else None
+            
+            rec_val = wdata.get("rec_num") if wdata.get("mostrar_alarma") and wdata.get("rec_val", 15) > 0 else None
+            rec_uni = wdata.get("rec_uni") if wdata.get("mostrar_alarma") and wdata.get("rec_val", 15) > 0 else None
 
             motivo_final = wdata.get("motivo", "Sin definir")
             if motivo_final == "Sin definir":
@@ -642,10 +692,10 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_confirm = (
                     f"✅ ¡Tarea Guardada con Éxito!\n\n"
                     f"📌 Motivo: {motivo_final}\n"
-                    f"📅 Fecha y Hora: {dia:02d}/{mes:02d}/{ano} a las {hora_12}:{minuto:02d} {ampm}\n"
+                    f"📅 Fecha y Hora: {dia:02d}/{mes:02d}/{ano} a las {hora_24:02d}:{minuto:02d} horas\n"
                 )
                 if rec_val:
-                    msg_confirm += f"⏰ Alarma móvil: {rec_val} {rec_uni} antes"
+                    msg_confirm += f"⏰ Alarma móvil configurada."
                 
                 context.user_data["wizard"] = {}
                 await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
@@ -791,13 +841,13 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "wizard" not in context.user_data:
             context.user_data["wizard"] = {}
         text = "".join(filter(str.isdigit, update.message.text))
-        context.user_data["wizard"]["rec_num"] = text if text else "15"
+        context.user_data["wizard"]["rec_num"] = int(text) if text else 15
         USER_STATES.pop(chat_id, None)
         await update.message.reply_text("✅ Alarma actualizada:", reply_markup=teclado_wizard_fecha(context.user_data["wizard"]))
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Panel de Hora/Minutos y Gemini Actualizado...")
+    logger.info("Iniciando Tareas_TDAH Bot con Correcciones Solicitadas...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
@@ -813,6 +863,9 @@ def main():
 
     threading.Thread(target=verificar_y_enviar_alertas, args=(app,), daemon=True).start()
 
+    app.run_polling()
+
+if __name__ == "__main__":
     app.run_polling()
 
 if __name__ == "__main__":
