@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import threading
+import asyncio
 import calendar
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -352,7 +353,7 @@ def verificar_y_enviar_alertas(application):
         except Exception:
             pass
 
-# --- 3. GEMINI IA INTEGRATION (Robust fallback model for 503/404 errors) ---
+# --- 3. GEMINI IA INTEGRATION (Non-blocking & Robust) ---
 def consultar_gemini(prompt):
     if not GEMINI_API_KEY:
         return "⚠️ Configura GEMINI_API_KEY en Render para usar las funciones de IA."
@@ -380,10 +381,11 @@ def teclado_principal(es_admin=False):
     keyboard = [
         [InlineKeyboardButton("➕ 1. Añadir Tarea", callback_data="m1_crear")],
         [InlineKeyboardButton("📋 2. Listar Tareas", callback_data="m2_listar")],
-        [InlineKeyboardButton("✏️ 3. Modificar Tareas", callback_data="m3_modificar")],
-        [InlineKeyboardButton("🧩 4. IA: Desglose Anti-Parálisis", callback_data="m4_ia_desglose")],
-        [InlineKeyboardButton("⚡ 5. IA: Coach Dopamina & Foco", callback_data="m5_ia_dopamina")],
-        [InlineKeyboardButton("🔄 6. Reutilizar Tarea Secuencial", callback_data="m6_secuencial")]
+        [InlineKeyboardButton("⏰ 3. Listar Alarmas", callback_data="m3_alarmas")],
+        [InlineKeyboardButton("✏️ 4. Modificar Tareas", callback_data="m4_modificar")],
+        [InlineKeyboardButton("🧩 5. IA: Desglose Anti-Parálisis", callback_data="m5_ia_desglose")],
+        [InlineKeyboardButton("⚡ 6. IA: Coach Dopamina & Foco", callback_data="m6_ia_dopamina")],
+        [InlineKeyboardButton("🔄 7. Reutilizar Tarea Secuencial", callback_data="m7_secuencial")]
     ]
     if es_admin:
         keyboard.append([InlineKeyboardButton("🛡️ Panel de Administrador", callback_data="menu_admin")])
@@ -743,8 +745,32 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📋 Tareas ({filtro.upper()}):\n\n" + ("\n".join([f"• #{t[0]} [{t[2].strftime('%d/%m %H:%M')}] {t[1]}" for t in tareas]) if tareas else "🎉 Sin tareas pendientes.")
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb_filtros))
 
+    # --- NUEVO MENÚ: LISTAR ALARMAS ASOCIADAS A TAREAS ---
+    elif query.data == "m3_alarmas":
+        tareas = db_obtener_tareas(chat_id, "todos")
+        msg = "⏰ **Alarmas asociadas a tus tareas pendientes:**\n\n"
+        if tareas:
+            for t in tareas:
+                tid, motivo, f_venc, rec_val, rec_uni = t[0], t[1], t[2], t[3], t[4]
+                if rec_val is not None:
+                    if rec_uni == "minutos":
+                        alarma_desc = f"{rec_val} minutos antes"
+                    elif rec_uni == "horas":
+                        alarma_desc = f"{rec_val} hora(s) antes"
+                    else:
+                        alarma_desc = f"{rec_val} {rec_uni}"
+                else:
+                    alarma_desc = "Sin alarma programada"
+                
+                msg += f"📌 **#{tid}** {motivo}\n   📅 Vence: {f_venc.strftime('%d/%m/%Y %H:%M')}\n   ⏰ Alarma: **{alarma_desc}**\n\n"
+        else:
+            msg += "🎉 No tienes tareas pendientes ni alarmas activas."
+
+        kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]]
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
     # --- MODIFICAR TAREAS CON BOTÓN DE ALARMA MÓVIL ---
-    elif query.data.startswith("m3_") or query.data == "m3_modificar":
+    elif query.data.startswith("m4_") or query.data == "m4_modificar":
         tareas = db_obtener_tareas(chat_id, "todos")
         kb = []
         msg = "✏️ Modificar, Completar o Poner Alarma a Tareas:\n\n" + ("Selecciona una acción:" if tareas else "✨ No hay tareas pendientes.")
@@ -769,7 +795,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("30mitAntes", callback_data=f"set_t_alarm_{tid}_30"),
                 InlineKeyboardButton("1horaantes", callback_data=f"set_t_alarm_{tid}_60")
             ],
-            [InlineKeyboardButton("⬅️ Volver a Modificar", callback_data="m3_modificar")]
+            [InlineKeyboardButton("⬅️ Volver a Modificar", callback_data="m4_modificar")]
         ]
         await query.edit_message_text(f"⏰ Selecciona la Alarma Móvil para la Tarea #{tid}:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -811,7 +837,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    elif query.data == "m4_ia_desglose":
+    elif query.data == "m5_ia_desglose":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
             await query.edit_message_text("🧩 IA Anti-Parálisis: Sin tareas pendientes.", reply_markup=teclado_principal(es_admin))
@@ -825,23 +851,25 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tareas = db_obtener_tareas(chat_id, "todos")
         tarea_sel = next((t for t in tareas if t[0] == tid), None)
         if tarea_sel:
-            await context.bot.send_message(chat_id=chat_id, text="🧠 Gemini fragmentando tarea en micro-pasos...")
+            await query.edit_message_text("🧠 Gemini fragmentando tarea en micro-pasos...")
             prompt = f"Actúa como experto TDAH. Divide la tarea '{tarea_sel[1]}' en 3 micro-pasos de menos de 5 minutos."
-            res = consultar_gemini(prompt)
+            # Llamada no bloqueante con asyncio.to_thread para evitar congelar el bot
+            res = await asyncio.to_thread(consultar_gemini, prompt)
             await context.bot.send_message(chat_id=chat_id, text=f"🧩 Micro-pasos:\n\n{res}")
 
-    elif query.data == "m5_ia_dopamina":
+    elif query.data == "m6_ia_dopamina":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
             await query.edit_message_text("⚡ Coach Dopamina: Sin tareas.", reply_markup=teclado_principal(es_admin))
             return
         resumen = "\n".join([f"- {t[1]}" for t in tareas[:7]])
-        await context.bot.send_message(chat_id=chat_id, text="⚡ Analizando con Gemini...")
+        await query.edit_message_text("⚡ Analizando con Gemini...")
         prompt = f"Actúa como Coach TDAH con gamificación. Tareas:\n{resumen}\n1. Asigna XP.\n2. Elige la tarea ideal para empezar AHORA."
-        res = consultar_gemini(prompt)
+        # Llamada no bloqueante con asyncio.to_thread para evitar congelar el bot
+        res = await asyncio.to_thread(consultar_gemini, prompt)
         await context.bot.send_message(chat_id=chat_id, text=f"⚡ Coach Dopamina & Foco:\n\n{res}")
 
-    elif query.data == "m6_secuencial":
+    elif query.data == "m7_secuencial":
         tareas = db_obtener_tareas(chat_id, "todos")
         if not tareas:
             await query.edit_message_text("🔄 Tareas Secuenciales: Sin tareas.", reply_markup=teclado_principal(es_admin))
@@ -856,7 +884,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📆 Diaria (1 día)", callback_data=f"sec_freq_{tid}_1")],
             [InlineKeyboardButton("📅 Semanal (7 días)", callback_data=f"sec_freq_{tid}_7")],
             [InlineKeyboardButton("🗓️ Mensual (30 días)", callback_data=f"sec_freq_{tid}_30")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="m6_secuencial")]
+            [InlineKeyboardButton("⬅️ Volver", callback_data="m7_secuencial")]
         ]
         await query.edit_message_text("Selecciona la frecuencia:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -889,7 +917,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con gestión de Alarmas por Tarea...")
+    logger.info("Iniciando Tareas_TDAH Bot con Listado de Alarmas y Asincronía IA...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
