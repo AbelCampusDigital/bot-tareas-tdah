@@ -41,6 +41,9 @@ except (TypeError, ValueError):
 # State Management for User Text Inputs
 USER_STATES = {}
 
+# Global reference to application loop for thread-safe alarm dispatching
+MAIN_APPLICATION = None
+
 # --- 1. SUPABASE DATABASE INITIALIZATION & MAINTENANCE ---
 def init_db():
     if not DATABASE_URL:
@@ -337,10 +340,14 @@ def verificar_y_enviar_alertas(application):
                         "¡Actúa ahora para mantener el foco! ⚡"
                     )
                     try:
-                        application.bot.send_message(
-                            chat_id=chat_id,
-                            text=mensaje_alerta,
-                            reply_markup=InlineKeyboardMarkup(kb)
+                        # Thread-safe dispatching to the main application loop in PTB v20+
+                        asyncio.run_coroutine_threadsafe(
+                            application.bot.send_message(
+                                chat_id=chat_id,
+                                text=mensaje_alerta,
+                                reply_markup=InlineKeyboardMarkup(kb)
+                            ),
+                            application.loop
                         )
                         cur.execute("UPDATE tareas SET notificado = TRUE WHERE id = %s;", (tid,))
                         conn.commit()
@@ -544,7 +551,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
-    # --- MENÚ DE PRUEBAS DE ALARMA (PLAN TEXT ROBUST) ---
+    # --- MENÚ DE PRUEBAS DE ALARMA ---
     elif query.data == "admin_pruebas":
         if not es_admin:
             return
@@ -564,7 +571,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not es_admin:
             return
         try:
-            # Enviamos un mensaje nuevo Y un popup de alerta nativo para asegurar feedback inmediato
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="🚨🔔 [PRUEBA] ¡ALARMA INMEDIATA ACTIVADA! 📱💥\n\n"
@@ -592,11 +598,11 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         asyncio.create_task(tarea_alarma_5m())
 
-    # --- MENÚ ABOUT (PLAIN TEXT ROBUST) ---
+    # --- MENÚ ABOUT ACTUALIZADO (Abel & https://github.com/AbelCampusDigital) ---
     elif query.data == "m8_about":
         about_text = (
             "ℹ️ Acerca de Tareas_TDAH (About)\n\n"
-            "👨‍💻 Creador: Abel Carmona Gracia\n"
+            "👨‍💻 Creador: Abel\n"
             "🌐 GitHub: https://github.com/AbelCampusDigital\n"
             "🧠 Propósito: Bot de automatización y gestión anti-parálisis diseñado para simplificar la carga mental y potenciar el hiperfoco.\n\n"
             "💬 \"El TDAH es la evolución, disfrútalo\" ⚡"
@@ -768,7 +774,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["wizard"] = {}
                 await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
             else:
-                await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal(es_admin))
+                await query.edit_message_text("❌ Error guardando in Supabase.", reply_markup=teclado_principal(es_admin))
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_principal(es_admin))
 
@@ -805,7 +811,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         meses_es = {
-            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abryl", 5: "Mayo", 6: "Junio",
             7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
 
@@ -1011,7 +1017,8 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Corrección de Markdown y Alarmas...")
+    global MAIN_APPLICATION
+    logger.info("Iniciando Tareas_TDAH Bot con Hilo Seguro de Alarmas y About Actualizado...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
@@ -1021,6 +1028,8 @@ def main():
         return
 
     app = Application.builder().token(TOKEN).build()
+    MAIN_APPLICATION = app
+
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CallbackQueryHandler(procesar_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_texto))
