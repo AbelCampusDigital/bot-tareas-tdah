@@ -32,7 +32,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# --- CONFIGURACIÓN DE ADMINISTRADOR (Opcional) ---
+# --- CONFIGURACIÓN DE ADMINISTRADOR ---
 try:
     MI_TELEGRAM_ID = int(os.environ.get("MI_TELEGRAM_ID")) if os.environ.get("MI_TELEGRAM_ID") else None
 except (TypeError, ValueError):
@@ -74,9 +74,22 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS usuarios_actividad (
                     chat_id BIGINT PRIMARY KEY,
+                    nombre TEXT,
+                    apellido TEXT,
+                    username TEXT,
+                    telefono TEXT,
+                    correo TEXT,
+                    foto_id TEXT,
                     ultimo_login TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
             """)
+            # Add columns if table already existed without them
+            for col, col_type in [
+                ("nombre", "TEXT"), ("apellido", "TEXT"), ("username", "TEXT"),
+                ("telefono", "TEXT"), ("correo", "TEXT"), ("foto_id", "TEXT")
+            ]:
+                cur.execute(f"ALTER TABLE usuarios_actividad ADD COLUMN IF NOT EXISTS {col} {col_type};")
+
             conn.commit()
             cur.close()
             conn.close()
@@ -87,18 +100,27 @@ def init_db():
             time.sleep(2)
     return False
 
-def registrar_o_actualizar_usuario(chat_id):
-    if not DATABASE_URL:
+def registrar_o_actualizar_usuario(user):
+    if not DATABASE_URL or not user:
         return
     try:
+        chat_id = user.id
+        nombre = user.first_name or ""
+        apellido = user.last_name or ""
+        username = user.username or ""
+        
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO usuarios_actividad (chat_id, ultimo_login) 
-            VALUES (%s, NOW()) 
+            INSERT INTO usuarios_actividad (chat_id, nombre, apellido, username, ultimo_login) 
+            VALUES (%s, %s, %s, %s, NOW()) 
             ON CONFLICT (chat_id) 
-            DO UPDATE SET ultimo_login = NOW();
-        """, (chat_id,))
+            DO UPDATE SET 
+                nombre = EXCLUDED.nombre,
+                apellido = EXCLUDED.apellido,
+                username = EXCLUDED.username,
+                ultimo_login = NOW();
+        """, (chat_id, nombre, apellido, username))
         conn.commit()
         cur.close()
         conn.close()
@@ -340,7 +362,6 @@ def verificar_y_enviar_alertas(application):
                         "¡Actúa ahora para mantener el foco! ⚡"
                     )
                     try:
-                        # Thread-safe dispatching to the main application loop in PTB v20+
                         asyncio.run_coroutine_threadsafe(
                             application.bot.send_message(
                                 chat_id=chat_id,
@@ -359,7 +380,7 @@ def verificar_y_enviar_alertas(application):
         except Exception as e:
             logger.error(f"Error en bucle de alertas: {e}")
 
-# --- 3. GEMINI IA INTEGRATION (Non-blocking & Robust) ---
+# --- 3. GEMINI IA INTEGRATION ---
 def consultar_gemini(prompt):
     if not GEMINI_API_KEY:
         return "⚠️ Configura GEMINI_API_KEY en Render para usar las funciones de IA."
@@ -401,9 +422,10 @@ def teclado_principal(es_admin=False):
 def teclado_admin():
     keyboard = [
         [InlineKeyboardButton("📊 1. Estadísticas de Usuarios", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 2. Listar Tareas de Otros", callback_data="admin_listar_otros")],
-        [InlineKeyboardButton("🧪 3. Pruebas de Alarma", callback_data="admin_pruebas")],
-        [InlineKeyboardButton("🧹 4. Forzar Limpieza / Borrar", callback_data="admin_limpiar_db")],
+        [InlineKeyboardButton("👥 2. Info de Usuarios", callback_data="admin_usuarios_info")],
+        [InlineKeyboardButton("📋 3. Listar Tareas de Otros", callback_data="admin_listar_otros")],
+        [InlineKeyboardButton("🧪 4. Pruebas de Alarma", callback_data="admin_pruebas")],
+        [InlineKeyboardButton("🧹 5. Forzar Limpieza / Borrar", callback_data="admin_limpiar_db")],
         [InlineKeyboardButton("⬅️ Volver al Menú Principal", callback_data="menu_principal")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -463,14 +485,14 @@ def teclado_wizard_fecha(datos):
 
 # --- 5. HANDLERS TELEGRAM ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    registrar_o_actualizar_usuario(user_id)
+    user = update.effective_user
+    registrar_o_actualizar_usuario(user)
     ejecutar_rutina_limpieza_bd()
-    es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
+    es_admin = (MI_TELEGRAM_ID is not None and user.id == MI_TELEGRAM_ID)
 
     welcome_text = (
         f"🧠 ¡Hola! Soy tu bot Tareas_TDAH.\n"
-        f"🆔 Tu ID de usuario es: {user_id}\n\n"
+        f"🆔 Tu ID de usuario es: {user.id}\n\n"
         f"Diseñado para reducir la carga mental, evitar la parálisis por análisis y mantener el foco."
     )
     await update.message.reply_text(
@@ -481,11 +503,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user = query.from_user
     chat_id = query.message.chat_id
 
-    registrar_o_actualizar_usuario(user_id)
-    es_admin = (MI_TELEGRAM_ID is not None and user_id == MI_TELEGRAM_ID)
+    registrar_o_actualizar_usuario(user)
+    es_admin = (MI_TELEGRAM_ID is not None and user.id == MI_TELEGRAM_ID)
 
     now = datetime.now()
     if "wizard" not in context.user_data:
@@ -535,6 +557,40 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
+    elif query.data == "admin_usuarios_info":
+        if not es_admin:
+            return
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            cur = conn.cursor()
+            cur.execute("SELECT chat_id, nombre, apellido, username, telefono, correo, ultimo_login FROM usuarios_actividad ORDER BY ultimo_login DESC LIMIT 10;")
+            usuarios = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            msg = "👤 Información de Usuarios Registrados:\n\n"
+            if usuarios:
+                for u in usuarios:
+                    uid, nom, ap, usr, tel, corr, login = u
+                    nombre_completo = f"{nom or ''} {ap or ''}".strip() or "Sin nombre"
+                    username_str = f"@{usr}" if usr else "Sin username"
+                    telefono_str = tel or "No registrado"
+                    correo_str = corr or "No registrado"
+                    login_str = login.strftime('%d/%m/%Y %H:%M') if login else "N/D"
+                    
+                    msg += f"🆔 ID: {uid}\n" \
+                           f"• Nombre: {nombre_completo} ({username_str})\n" \
+                           f"• Teléfono: {telefono_str}\n" \
+                           f"• Correo: {correo_str}\n" \
+                           f"• Último acceso: {login_str}\n\n"
+            else:
+                msg += "No hay usuarios registrados todavía."
+                
+            kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]]
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error al consultar usuarios: {e}", reply_markup=teclado_admin())
+
     elif query.data == "admin_listar_otros":
         if not es_admin:
             return
@@ -551,7 +607,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
-    # --- MENÚ DE PRUEBAS DE ALARMA ---
+    # --- MENÚ DE PRUEBAS DE ALARMA (Forzando banner push) ---
     elif query.data == "admin_pruebas":
         if not es_admin:
             return
@@ -562,8 +618,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "🧪 Menú de Pruebas de Alarma\n\n"
-            "Nota sobre el teléfono: En Telegram, las alarmas llegan como mensajes push con sonido/vibración. "
-            "Asegúrate de que las notificaciones de la app de Telegram y tu chat con este bot no estén silenciadas.",
+            "Nota sobre el teléfono: Si estás dentro del chat mirando esta pantalla, Telegram a veces oculta el banner flotante por diseño. "
+            "Al pulsar 'Alarma Inmediata', el bot enviará un mensaje nuevo fuera del menú para forzar el aviso push.",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
@@ -571,12 +627,13 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not es_admin:
             return
         try:
+            # Enviamos un mensaje independiente para que la notificación push / banner salte con seguridad en el móvil
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="🚨🔔 [PRUEBA] ¡ALARMA INMEDIATA ACTIVADA! 📱💥\n\n"
-                     "Si ves esto en tu móvil, el sistema de avisos funciona correctamente. ⚡"
+                     "Si ves la notificación emergente, el sistema de avisos funciona al 100%. ⚡"
             )
-            await query.answer("✅ ¡Alarma inmediata enviada con éxito al chat!", show_alert=True)
+            await query.answer("✅ ¡Alarma inmediata enviada como mensaje independiente al chat!", show_alert=True)
         except Exception as e:
             await query.answer(f"❌ Error: {e}", show_alert=True)
 
@@ -586,7 +643,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⏱️ Alarma programada para dentro de 5 minutos.", show_alert=True)
         
         async def tarea_alarma_5m():
-            await asyncio.sleep(300) # 5 minutos
+            await asyncio.sleep(300)
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
@@ -598,7 +655,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         asyncio.create_task(tarea_alarma_5m())
 
-    # --- MENÚ ABOUT ACTUALIZADO (Abel & https://github.com/AbelCampusDigital) ---
+    # --- MENÚ ABOUT ---
     elif query.data == "m8_about":
         about_text = (
             "ℹ️ Acerca de Tareas_TDAH (About)\n\n"
@@ -774,7 +831,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["wizard"] = {}
                 await query.edit_message_text(msg_confirm, reply_markup=teclado_principal(es_admin))
             else:
-                await query.edit_message_text("❌ Error guardando in Supabase.", reply_markup=teclado_principal(es_admin))
+                await query.edit_message_text("❌ Error guardando en Supabase.", reply_markup=teclado_principal(es_admin))
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_principal(es_admin))
 
@@ -811,7 +868,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         meses_es = {
-            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abryl", 5: "Mayo", 6: "Junio",
+            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
             7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
         }
 
@@ -998,6 +1055,9 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- 6. TEXT INPUT HANDLER ---
 async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    user = update.effective_user
+    registrar_o_actualizar_usuario(user)
+    
     if chat_id not in USER_STATES:
         return
     estado = USER_STATES.get(chat_id)
@@ -1018,7 +1078,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- 7. MAIN APPLICATION ---
 def main():
     global MAIN_APPLICATION
-    logger.info("Iniciando Tareas_TDAH Bot con Hilo Seguro de Alarmas y About Actualizado...")
+    logger.info("Iniciando Tareas_TDAH Bot con Panel de Usuarios y Alarma Inmediata Forzada...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
@@ -1038,5 +1098,5 @@ def main():
 
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == "main" or __name__ == "__main__":
     main()
