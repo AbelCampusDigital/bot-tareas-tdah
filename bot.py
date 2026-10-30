@@ -597,7 +597,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         about_text = (
             "ℹ️ Acerca de Tareas_TDAH (About)\n\n"
             "👨‍💻 Creador: Abel Carmona Gracia\n"
-            "🌐 GitHub: https://github.com/abelcarmona\n"
+            "🌐 GitHub: https://github.com/AbelCampusDigital\n"
             "🧠 Propósito: Bot de automatización y gestión anti-parálisis diseñado para simplificar la carga mental y potenciar el hiperfoco.\n\n"
             "💬 \"El TDAH es la evolución, disfrútalo\" ⚡"
         )
