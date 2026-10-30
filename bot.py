@@ -331,7 +331,7 @@ def verificar_y_enviar_alertas(application):
                         [InlineKeyboardButton("📋 Ver Mis Tareas", callback_data="m2_listar")]
                     ]
                     mensaje_alerta = (
-                        f"⏰ **¡RECORDATORIO TDAH EN TU MÓVIL!** 📱\n\n"
+                        f"🚨🔔 **¡ALARMA DE TAREA TDAH!** 📱💥\n\n"
                         f"📌 Tarea: **{motivo}**\n"
                         f"📅 Vence el: {f_venc.strftime('%d/%m/%Y a las %H:%M')}\n\n"
                         f"¡Actúa ahora para mantener el foco! ⚡"
@@ -385,7 +385,8 @@ def teclado_principal(es_admin=False):
         [InlineKeyboardButton("✏️ 4. Modificar Tareas", callback_data="m4_modificar")],
         [InlineKeyboardButton("🧩 5. IA: Desglose Anti-Parálisis", callback_data="m5_ia_desglose")],
         [InlineKeyboardButton("⚡ 6. IA: Coach Dopamina & Foco", callback_data="m6_ia_dopamina")],
-        [InlineKeyboardButton("🔄 7. Reutilizar Tarea Secuencial", callback_data="m7_secuencial")]
+        [InlineKeyboardButton("🔄 7. Reutilizar Tarea Secuencial", callback_data="m7_secuencial")],
+        [InlineKeyboardButton("ℹ️ 8. About", callback_data="m8_about")]
     ]
     if es_admin:
         keyboard.append([InlineKeyboardButton("🛡️ Panel de Administrador", callback_data="menu_admin")])
@@ -544,7 +545,7 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Error: {e}", reply_markup=teclado_admin())
 
-    # --- MENÚ DE PRUEBAS DE ALARMA (Punto 3) ---
+    # --- MENÚ DE PRUEBAS DE ALARMA CON ALERTA VISUAL Y SONORA EN TELEGRAM ---
     elif query.data == "admin_pruebas":
         if not es_admin:
             return
@@ -553,7 +554,13 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⏱️ Alarma en 5 Minutos", callback_data="test_alarm_5m")],
             [InlineKeyboardButton("⬅️ Volver", callback_data="menu_admin")]
         ]
-        await query.edit_message_text("🧪 **Menú de Pruebas de Alarma**\nPrueba los recordatorios en tu móvil:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(
+            "🧪 **Menú de Pruebas de Alarma**\n\n"
+            "💡 *Nota sobre el teléfono:* En Telegram, las alarmas llegan como mensajes push con sonido/vibración. "
+            "Asegúrate de que las notificaciones de la app de Telegram y tu chat con este bot no estén silenciadas.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
 
     elif query.data == "test_alarm_now":
         if not es_admin:
@@ -561,10 +568,12 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="⏰ **[PRUEBA] ¡Alarma Inmediata en tu móvil!** 📱\n\nEl sistema de avisos funciona correctamente. ⚡",
+                text="🚨🔔 **[PRUEBA] ¡ALARMA INMEDIATA ACTIVADA!** 📱💥\n\n"
+                     "Si ves y oyes esto en tu móvil, el sistema de alertas push funciona correctamente.\n"
+                     "*(Si no suena, revisa que Telegram tenga permisos de sonido y notificaciones activados)*. ⚡",
                 parse_mode="Markdown"
             )
-            await query.answer("✅ Alarma inmediata enviada con éxito.", show_alert=True)
+            await query.answer("✅ Alarma inmediata enviada.", show_alert=True)
         except Exception as e:
             await query.answer(f"❌ Error: {e}", show_alert=True)
 
@@ -578,13 +587,26 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text="⏰ **[PRUEBA] ¡Alarma de los 5 minutos!** 📱\n\nEl temporizador asíncrono ha saltado perfectamente. ⚡",
+                    text="🚨🔔 **[PRUEBA] ¡ALARMA DE LOS 5 MINUTOS!** 📱💥\n\n"
+                         "El temporizador asíncrono ha saltado perfectamente en tu móvil. ⚡",
                     parse_mode="Markdown"
                 )
             except Exception:
                 pass
         
         asyncio.create_task(tarea_alarma_5m())
+
+    # --- MENÚ ABOUT (Solicitado) ---
+    elif query.data == "m8_about":
+        about_text = (
+            "ℹ️ **Acerca de Tareas_TDAH (About)**\n\n"
+            "👨‍💻 **Creador:** Abel Carmona Gracia\n"
+            "🌐 **GitHub:** https://github.com/abelcarmona\n"
+            "🧠 **Propósito:** Bot de automatización y gestión anti-parálisis diseñado para simplificar la carga mental y potenciar el hiperfoco.\n\n"
+            "💬 *\"El TDAH es la evolución, disfrútalo\"* ⚡"
+        )
+        kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]]
+        await query.edit_message_text(about_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data == "admin_limpiar_db":
         if not es_admin:
@@ -770,7 +792,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {e}")
 
-    # --- PUNTO 1 & 2: LISTAR TAREAS CON FORMATO SECUENCIAL Y TÍTULOS DE SEMANA/MES ---
     elif query.data.startswith("m2_") or query.data == "m2_listar":
         filtro = "todos"
         if "_" in query.data and query.data != "m2_listar":
@@ -797,7 +818,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if filtro == "semana":
                 grupos = {}
                 for t in tareas:
-                    # t[2] es fecha_vencimiento
                     sem = t[2].isocalendar()[1]
                     grupos.setdefault(sem, []).append(t)
                 for sem, lista in sorted(grupos.items()):
@@ -827,10 +847,8 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_filtros))
 
-    # --- PUNTO 1: LISTAR SÓLO ALARMAS QUE TIENEN ALARMA ---
     elif query.data == "m3_alarmas":
         tareas = db_obtener_tareas(chat_id, "todos")
-        # Filtrar únicamente las tareas que tienen recordatorio_valor NOT NULL
         tareas_con_alarma = [t for t in tareas if t[3] is not None]
         
         msg = "⏰ **Alarmas asociadas a tus tareas pendientes:**\n\n"
@@ -851,7 +869,6 @@ async def procesar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("⬅️ Volver", callback_data="menu_principal")]]
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
-    # --- MODIFICAR TAREAS CON BOTÓN DE ALARMA MÓVIL ---
     elif query.data.startswith("m4_") or query.data == "m4_modificar":
         tareas = db_obtener_tareas(chat_id, "todos")
         kb = []
@@ -998,7 +1015,7 @@ async def manejar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 7. MAIN APPLICATION ---
 def main():
-    logger.info("Iniciando Tareas_TDAH Bot con Mejoras de Listado y Pruebas de Alarma...")
+    logger.info("Iniciando Tareas_TDAH Bot con Menú About y Alertas Mejoradas...")
     init_db()
 
     threading.Thread(target=start_health_check, daemon=True).start()
